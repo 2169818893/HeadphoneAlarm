@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<!--
+  UI 预览镜像：逐组件复刻 Compose 源码（AlarmListScreen / AlarmEditScreen / AlarmRingActivity /
+  Theme.kt / Widgets.kt / WheelPicker.kt）的配色、间距、字号与文案，仅用于浏览器预览，
+  不参与 APK 构建。修改 Compose UI 后需同步更新本文件。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HeadphoneAlarm · UI 预览</title>
+<style>
+:root{
+  /* ==== 主题令牌（默认：Aurora 极光，对应 Theme.kt） ==== */
+  --a-rgb:94,231,223;   /* 主强调色 accent */
+  --b-rgb:180,144,202;  /* 次强调色 secondary */
+  --c-rgb:79,140,255;   /* 第三色 / 光斑 */
+  --aurora-cyan:rgb(var(--a-rgb));
+  --aurora-blue:rgb(var(--c-rgb));
+  --aurora-violet:rgb(var(--b-rgb));
+  --text-primary:#E9EDFF;
+  --text-secondary:#97A3C6;
+  --danger-red:#FF6B7A;
+  --night-outline:#2A3557;
+  --on-cyan:#00201E;
+  --on-violet:#1A0F2B;
+  --outline-rgb:42,53,87;
+  --surface-rgb:255,255,255;  /* 中性玻璃层（卡片/胶囊/滑轨底色） */
+  --scrim-rgb:7,11,26;
+  --card:rgba(255,255,255,.078);
+  --card-border:rgba(42,53,87,.6);
+  --card-shadow:none;
+  --chip-solid:rgba(255,255,255,.12);
+  --page-bg:#0b0e18;
+  --phone-bg:linear-gradient(180deg,#050814,#0A1024 50%,#050814);
+  --phone-mid:#0d1428;
+  --ring-bg:linear-gradient(180deg,#090E22,#141C3C 50%,#090E22);
+  --accent-glow:rgba(94,231,223,.35);
+  --radius:24px;
+  --phone-radius:44px;
+  --glow:
+    radial-gradient(circle 400px at 12% 6%,rgba(79,140,255,.26),transparent 70%),
+    radial-gradient(circle 340px at 95% 22%,rgba(180,144,202,.20),transparent 70%),
+    radial-gradient(circle 400px at 50% 102%,rgba(94,231,223,.12),transparent 70%);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{
+  font-family:"Roboto","Segoe UI","Microsoft YaHei",sans-serif;
+  background:var(--page-bg);
+  color:var(--text-primary);
+  display:flex;flex-direction:column;align-items:center;
+  min-height:100vh;padding:24px 12px 48px;
+}
+h1{font-size:19px;font-weight:600;margin-bottom:4px}
+.sub{font-size:12.5px;color:var(--text-secondary);margin-bottom:18px}
+.tabs{display:flex;gap:4px;background:rgba(var(--surface-rgb),.067);border-radius:16px;padding:4px;margin-bottom:14px}
+.tabs button{
+  border:0;background:transparent;color:var(--text-secondary);
+  font-size:13.5px;font-weight:500;padding:9px 20px;border-radius:12px;cursor:pointer;
+  transition:background .25s,color .25s;font-family:inherit;
+}
+.tabs button.on{background:rgba(var(--b-rgb),.85);color:var(--on-violet);font-weight:600}
+/* 手机外壳 */
+.phone{
+  width:390px;height:800px;border-radius:var(--phone-radius);border:1px solid rgba(var(--outline-rgb),.9);
+  background:var(--phone-bg);
+  position:relative;overflow:hidden;isolation:isolate;box-shadow:0 24px 80px rgba(0,0,0,.6);
+}
+/* 主题装饰层（光斑/网格/气泡等，位于内容之下） */
+.phone::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:1;opacity:0}
+/* AuroraBackground：三层径向光斑，坐标照抄 Theme.kt */
+.phone::before{
+  content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+  background:var(--glow);
+}
+.statusbar{
+  position:relative;height:34px;display:flex;justify-content:space-between;align-items:center;
+  padding:0 22px;font-size:12px;color:var(--text-secondary);
+}
+.screen{position:absolute;inset:34px 0 0;overflow-y:auto;scrollbar-width:thin;display:none;z-index:2}
+.screen.on{display:block}
+.screen::-webkit-scrollbar{width:3px}
+.screen::-webkit-scrollbar-thumb{background:rgba(var(--surface-rgb),.2);border-radius:2px}
+.content{padding:24px 20px 120px;display:flex;flex-direction:column;gap:14px;position:relative}
+/* GlassCard */
+.card{
+  background:var(--card);border:1px solid var(--card-border);
+  border-radius:var(--radius);padding:18px;box-shadow:var(--card-shadow);
+}
+.row{display:flex;align-items:center;gap:8px}
+.gap14{gap:14px}
+.spacer{flex:1}
+/* 文本样式 */
+.t-display{font-size:44px;font-weight:700;letter-spacing:-1px;line-height:1.1}
+.t-title{font-size:17px;font-weight:500}
+.t-body{font-size:14px}
+.t-small{font-size:12px;color:var(--text-secondary)}
+.t-violet{color:var(--aurora-violet)}
+.t-cyan{color:var(--aurora-cyan)}
+.sec-title{font-size:12.5px;font-weight:500;color:var(--text-secondary);padding:4px 0 0 4px}
+/* 图标圆形底 */
+.icon-chip{
+  width:42px;height:42px;border-radius:50%;background:rgba(var(--a-rgb),.14);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.icon-chip svg{width:21px;height:21px;stroke:var(--aurora-cyan);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.icon-chip.sm{width:36px;height:36px;background:rgba(var(--a-rgb),.12)}
+.icon-chip.sm svg{width:19px;height:19px}
+/* StatusPill */
+.pill{
+  display:inline-flex;align-items:center;gap:6px;border-radius:999px;
+  padding:6px 12px;font-size:11.5px;
+}
+.pill svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.pill.active{color:var(--aurora-cyan);background:rgba(var(--a-rgb),.12);border:1px solid rgba(var(--a-rgb),.35)}
+.pill.inactive{color:var(--text-secondary);background:rgba(151,163,198,.12);border:1px solid rgba(151,163,198,.35)}
+/* Switch */
+.switch{width:46px;height:26px;border-radius:999px;background:rgba(var(--surface-rgb),.133);position:relative;cursor:pointer;transition:background .2s;flex-shrink:0}
+.switch::after{content:"";position:absolute;width:18px;height:18px;border-radius:50%;background:var(--text-secondary);top:4px;left:4px;transition:left .2s,background .2s}
+.switch.on{background:var(--aurora-cyan)}
+.switch.on::after{left:24px;background:var(--on-cyan)}
+/* Slider */
+.slider-line{height:4px;border-radius:999px;background:rgba(var(--surface-rgb),.133);position:relative;margin:14px 6px 6px}
+.slider-line .fill{position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:var(--aurora-cyan)}
+.slider-line .thumb{position:absolute;width:14px;height:14px;border-radius:50%;background:var(--aurora-cyan);top:50%;transform:translateY(-50%)}
+/* 渐变横幅 */
+.footer-banner{
+  border-radius:18px;padding:16px;
+  background:linear-gradient(90deg,rgba(var(--b-rgb),.16),rgba(var(--a-rgb),.10));
+}
+/* FAB */
+.fab{
+  position:absolute;right:18px;bottom:22px;display:flex;align-items:center;gap:8px;
+  background:var(--aurora-cyan);color:var(--on-cyan);border-radius:16px;
+  padding:15px 20px;font-size:14.5px;font-weight:600;cursor:pointer;
+  box-shadow:0 6px 20px var(--accent-glow);z-index:5;
+}
+.fab svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round}
+/* 权限提示行 */
+.perm-action{display:block;width:100%;text-align:left;background:none;border:0;color:var(--aurora-cyan);font-size:13.5px;padding:9px 0;cursor:pointer;font-family:inherit}
+/* 时间滚轮 */
+.wheel-wrap{display:flex;align-items:center;justify-content:center;gap:2px;position:relative;height:270px}
+.wheel-mask{position:absolute;inset:0;pointer-events:none;background:
+  linear-gradient(180deg,var(--phone-mid) 0%,transparent 33%,transparent 67%,var(--phone-mid) 100%);opacity:.92}
+.sel-bar{position:absolute;left:8%;right:8%;top:50%;transform:translateY(-50%);height:54px;border-top:1.5px solid rgba(var(--a-rgb),.65);border-bottom:1.5px solid rgba(var(--a-rgb),.65);pointer-events:none}
+.wheel{height:270px;overflow:hidden;width:96px;cursor:ns-resize;user-select:none;position:relative}
+.wheel ul{list-style:none;transition:transform .18s ease-out}
+.wheel li{height:54px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:600;letter-spacing:-1px;color:var(--text-secondary)}
+.wheel li.sel{color:var(--aurora-cyan)}
+.colon{font-size:40px;font-weight:300;color:var(--text-primary);align-self:center}
+/* 星期胶囊 */
+.days{display:flex;gap:6px}
+.days div{
+  flex:1;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  background:rgba(var(--surface-rgb),.067);color:var(--text-secondary);font-size:15.5px;font-weight:500;cursor:pointer;
+  transition:background .2s,color .2s,transform .2s;transform:scale(.94);
+}
+.days div.on{background:var(--aurora-cyan);color:var(--on-cyan);font-weight:600;transform:scale(1)}
+.chip{display:inline-block;border-radius:999px;background:rgba(var(--surface-rgb),.078);padding:7px 12px;font-size:11.5px;color:var(--text-secondary);cursor:pointer}
+/* 分段选择 */
+.seg{display:flex;background:rgba(var(--surface-rgb),.067);border-radius:16px;padding:4px;gap:4px}
+.seg div{flex:1;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:500;color:var(--text-secondary);cursor:pointer;transition:background .2s}
+.seg div.on{background:rgba(var(--b-rgb),.85);color:var(--on-violet)}
+/* 铃声行 */
+.tone-row{display:flex;align-items:center;padding:4px 0;border-radius:14px;cursor:pointer}
+.radio{width:20px;height:20px;border-radius:50%;border:2px solid var(--text-secondary);margin-right:12px;flex-shrink:0;position:relative}
+.radio.on{border-color:var(--aurora-cyan)}
+.radio.on::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--aurora-cyan)}
+.play-btn{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
+.play-btn svg{width:22px;height:22px;stroke:var(--text-secondary);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+/* 顶栏 */
+.topbar{display:flex;align-items:center;gap:10px;padding:14px 10px 4px;position:sticky;top:0;z-index:4;background:linear-gradient(180deg,rgba(var(--scrim-rgb),.9),rgba(var(--scrim-rgb),0))}
+.topbar .back{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.topbar .back svg{width:22px;height:22px;stroke:var(--text-primary);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.topbar b{font-size:17.5px;font-weight:600}
+/* 按钮 */
+.btn{border:0;width:100%;height:52px;border-radius:26px;background:var(--aurora-cyan);color:var(--on-cyan);font-size:15.5px;font-weight:600;cursor:pointer;font-family:inherit}
+.btn-violet{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:46px;border-radius:23px;background:rgba(var(--b-rgb),.22);color:var(--text-primary);border:0;font-size:14px;cursor:pointer;font-family:inherit}
+.btn-violet svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.del-row{display:flex;align-items:center;justify-content:center;gap:6px;color:var(--danger-red);font-size:14px;padding:12px;cursor:pointer}
+.del-row svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+/* 输入框 */
+.textfield{width:100%;background:transparent;border:1px solid rgba(var(--surface-rgb),.2);border-radius:4px;color:var(--text-primary);font-size:15px;padding:15px 16px;outline:none;font-family:inherit}
+.textfield:focus{border-color:var(--aurora-cyan)}
+/* 响铃页 */
+.ring-screen{background:var(--ring-bg)}
+.ring-wrap{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:64px 28px;text-align:center}
+.ring-icon{width:140px;height:140px;border-radius:50%;display:flex;align-items:center;justify-content:center;animation:pulse 1.6s ease-in-out infinite alternate}
+.ring-icon{background:radial-gradient(circle,rgba(var(--a-rgb),.3),transparent 70%)}
+@keyframes pulse{from{transform:scale(.96);opacity:.8}to{transform:scale(1.04);opacity:1}}
+.ring-icon svg{width:64px;height:64px;stroke:var(--aurora-cyan);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.ring-time{font-size:76px;font-weight:300;line-height:1.05;margin-top:18px}
+.ring-status{display:inline-flex;align-items:center;gap:8px;background:rgba(var(--surface-rgb),.1);border-radius:999px;padding:8px 16px;margin-top:18px;font-size:14px;color:var(--aurora-cyan)}
+.ring-status svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.ramp{width:82%;margin-top:28px}
+.ramp .bar{height:8px;border-radius:999px;background:rgba(var(--surface-rgb),.1);overflow:hidden}
+.ramp .bar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--aurora-cyan),var(--aurora-violet));animation:grow 6s linear infinite}
+@keyframes grow{from{width:2%}to{width:100%}}
+.btn-ring{height:60px;border-radius:30px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:17px;font-weight:600;border:0;width:100%;cursor:pointer;font-family:inherit}
+.btn-ring svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.note{max-width:390px;margin-top:14px;font-size:11.5px;color:#5c6684;text-align:center;line-height:1.7}
+.disabled-card{opacity:.55}
+
+/* ===== 主题切换栏 ===== */
+.themes{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-bottom:26px;max-width:440px}
+.themes button{
+  display:flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.05);color:#c7cee4;font-size:12.5px;font-weight:500;
+  padding:8px 14px;border-radius:999px;cursor:pointer;font-family:inherit;transition:.22s;
+}
+.themes button::before{content:"";width:11px;height:11px;border-radius:50%;background:var(--dot);box-shadow:0 0 8px var(--dot)}
+.themes button:hover{transform:translateY(-1px)}
+.themes button.on{color:#fff;border-color:var(--dot);background:rgba(255,255,255,.1);box-shadow:0 4px 16px rgba(0,0,0,.25)}
+
+/* ===== 主题：赛博朋克 ===== */
+body[data-theme="cyber"]{
+  --a-rgb:0,242,195;--b-rgb:255,45,249;--c-rgb:157,78,255;
+  --text-primary:#e8fbff;--text-secondary:#6fb3c4;--danger-red:#ff2e63;
+  --on-cyan:#001a15;--on-violet:#1c0018;--night-outline:#1b3a44;--outline-rgb:0,242,195;
+  --surface-rgb:255,255,255;--scrim-rgb:6,2,16;
+  --card:rgba(12,6,26,.62);--card-border:rgba(0,242,195,.35);--card-shadow:0 0 18px rgba(0,242,195,.15),inset 0 0 22px rgba(255,45,249,.07);
+  --chip-solid:rgba(0,242,195,.16);
+  --page-bg:#05010d;--phone-bg:linear-gradient(180deg,#0a0118,#140026 50%,#05010d);--phone-mid:#0a0118;
+  --ring-bg:linear-gradient(180deg,#0c0119,#1a0130 50%,#0c0119);
+  --accent-glow:rgba(0,242,195,.5);--radius:8px;--phone-radius:26px;
+  --glow:radial-gradient(circle 380px at 85% 8%,rgba(255,45,249,.30),transparent 70%),radial-gradient(circle 420px at 10% 92%,rgba(0,242,195,.20),transparent 72%);
+}
+body[data-theme="cyber"] .phone::after{opacity:1;background:
+  linear-gradient(rgba(0,242,195,.07) 1px,transparent 1px) 0 0/100% 34px,
+  linear-gradient(90deg,rgba(255,45,249,.06) 1px,transparent 1px) 0 0/34px 100%;
+  -webkit-mask:linear-gradient(180deg,transparent,#000 35%,#000 65%,transparent);mask:linear-gradient(180deg,transparent,#000 35%,#000 65%,transparent);
+  animation:cyberscan 5s linear infinite}
+@keyframes cyberscan{from{background-position:0 0,0 0}to{background-position:0 34px,0 0}}
+body[data-theme="cyber"] .t-display,body[data-theme="cyber"] .ring-time{font-family:"Consolas","Courier New",monospace;letter-spacing:1px;text-shadow:0 0 10px rgba(var(--a-rgb),.6),2px 0 rgba(var(--b-rgb),.5)}
+body[data-theme="cyber"] .card{backdrop-filter:saturate(1.3)}
+
+/* ===== 主题：安卓原生 (Material You 浅色) ===== */
+body[data-theme="material"]{
+  --a-rgb:103,80,164;--b-rgb:124,77,255;--c-rgb:103,80,164;
+  --text-primary:#1d1b20;--text-secondary:#49454f;--danger-red:#b3261e;
+  --on-cyan:#ffffff;--on-violet:#ffffff;--night-outline:#cac4d0;--outline-rgb:202,196,208;
+  --surface-rgb:29,27,32;--scrim-rgb:254,247,255;
+  --card:#ffffff;--card-border:rgba(0,0,0,.05);--card-shadow:0 1px 2px rgba(0,0,0,.14),0 3px 10px rgba(0,0,0,.08);
+  --chip-solid:rgba(0,0,0,.08);
+  --page-bg:#efe9f6;--phone-bg:#fef7ff;--phone-mid:#fef7ff;
+  --ring-bg:linear-gradient(180deg,#f7f3ff,#ece6f7);
+  --accent-glow:rgba(103,80,164,.32);--radius:22px;--phone-radius:40px;
+  --glow:radial-gradient(circle 420px at 50% -5%,rgba(103,80,164,.10),transparent 70%);
+}
+body[data-theme="material"] .t-display{font-weight:600;letter-spacing:-.5px;color:#1d1b20}
+body[data-theme="material"] .fab,body[data-theme="material"] .btn{border-radius:18px}
+body[data-theme="material"] .pill.inactive{color:#49454f;background:rgba(29,27,32,.06);border-color:rgba(29,27,32,.14)}
+
+/* ===== 主题：动漫 ===== */
+body[data-theme="anime"]{
+  --a-rgb:255,120,168;--b-rgb:129,140,248;--c-rgb:255,170,205;
+  --text-primary:#5b4a68;--text-secondary:#9c8bab;--danger-red:#ff6b81;
+  --on-cyan:#ffffff;--on-violet:#ffffff;--night-outline:#ffd0e0;--outline-rgb:255,190,214;
+  --surface-rgb:255,150,190;--scrim-rgb:255,240,246;
+  --card:rgba(255,255,255,.72);--card-border:rgba(255,150,190,.45);--card-shadow:0 8px 22px rgba(255,143,177,.22);
+  --chip-solid:rgba(255,255,255,.65);
+  --page-bg:#ffe9f2;--phone-bg:linear-gradient(180deg,#ffe0ee,#e5efff 55%,#fff0f6);--phone-mid:#ffe9f4;
+  --ring-bg:linear-gradient(180deg,#ffdcec,#e6efff);
+  --accent-glow:rgba(255,120,168,.4);--radius:26px;--phone-radius:46px;
+  --glow:radial-gradient(circle 360px at 15% 8%,rgba(255,183,213,.5),transparent 70%),radial-gradient(circle 340px at 90% 25%,rgba(129,140,248,.32),transparent 72%);
+}
+body[data-theme="anime"] .t-display{color:#ff6f9f;font-weight:800}
+body[data-theme="anime"] .phone::after{opacity:.85;background:
+  radial-gradient(circle 7px at 20% 18%,rgba(255,255,255,.95),transparent 60%),
+  radial-gradient(circle 5px at 72% 12%,rgba(255,190,220,.95),transparent 60%),
+  radial-gradient(circle 6px at 46% 68%,rgba(255,255,255,.85),transparent 60%),
+  radial-gradient(circle 4px at 86% 52%,rgba(200,210,255,.95),transparent 60%),
+  radial-gradient(circle 6px at 30% 88%,rgba(255,200,225,.9),transparent 60%);
+  animation:drift 9s ease-in-out infinite alternate}
+@keyframes drift{from{transform:translateY(0) rotate(0)}to{transform:translateY(16px) rotate(8deg)}}
+
+/* ===== 主题：海洋 ===== */
+body[data-theme="ocean"]{
+  --a-rgb:53,224,194;--b-rgb:86,160,255;--c-rgb:45,212,191;
+  --text-primary:#e0f7ff;--text-secondary:#7fb0c4;--danger-red:#ff7a8a;
+  --on-cyan:#00252e;--on-violet:#04213d;--night-outline:#123a4a;--outline-rgb:18,58,74;
+  --surface-rgb:255,255,255;--scrim-rgb:1,18,28;
+  --card:rgba(255,255,255,.07);--card-border:rgba(53,224,194,.28);--card-shadow:0 8px 26px rgba(0,40,60,.4);
+  --chip-solid:rgba(53,224,194,.16);
+  --page-bg:#01101a;--phone-bg:linear-gradient(180deg,#01141f,#063049 55%,#01141f);--phone-mid:#021a26;
+  --ring-bg:linear-gradient(180deg,#021a28,#073a55);
+  --accent-glow:rgba(53,224,194,.45);--radius:24px;--phone-radius:44px;
+  --glow:radial-gradient(circle 420px at 20% 10%,rgba(86,160,255,.28),transparent 72%),radial-gradient(circle 380px at 90% 30%,rgba(53,224,194,.20),transparent 72%);
+}
+body[data-theme="ocean"] .phone::after{opacity:.5;background:
+  radial-gradient(circle 6px at 22% 96%,rgba(255,255,255,.55),transparent 60%),
+  radial-gradient(circle 4px at 55% 98%,rgba(255,255,255,.45),transparent 60%),
+  radial-gradient(circle 8px at 78% 94%,rgba(180,240,255,.45),transparent 60%),
+  radial-gradient(circle 3px at 40% 92%,rgba(255,255,255,.55),transparent 60%);
+  animation:bubbles 7s linear infinite}
+@keyframes bubbles{from{transform:translateY(0);opacity:.5}to{transform:translateY(-780px);opacity:0}}
+
+/* ===== 主题：森林 ===== */
+body[data-theme="forest"]{
+  --a-rgb:126,224,143;--b-rgb:224,184,110;--c-rgb:86,168,120;
+  --text-primary:#eef8ee;--text-secondary:#9bbb9f;--danger-red:#ff7d6b;
+  --on-cyan:#06210f;--on-violet:#2a1d05;--night-outline:#1e3a26;--outline-rgb:30,58,38;
+  --surface-rgb:255,255,255;--scrim-rgb:8,19,13;
+  --card:rgba(255,255,255,.06);--card-border:rgba(126,224,143,.26);--card-shadow:0 8px 24px rgba(0,20,8,.4);
+  --chip-solid:rgba(126,224,143,.16);
+  --page-bg:#081310;--phone-bg:linear-gradient(180deg,#08130d,#123018 55%,#08130d);--phone-mid:#0a1a11;
+  --ring-bg:linear-gradient(180deg,#0a1c11,#153a1e);
+  --accent-glow:rgba(126,224,143,.4);--radius:24px;--phone-radius:44px;
+  --glow:radial-gradient(circle 400px at 18% 8%,rgba(224,184,110,.22),transparent 72%),radial-gradient(circle 420px at 88% 26%,rgba(86,168,120,.30),transparent 72%);
+}
+body[data-theme="forest"] .phone::after{opacity:.35;background:
+  radial-gradient(circle 90px at 25% 20%,rgba(230,225,130,.28),transparent 70%),
+  radial-gradient(circle 120px at 75% 42%,rgba(180,230,150,.20),transparent 70%),
+  radial-gradient(circle 80px at 52% 78%,rgba(240,222,150,.18),transparent 70%);
+  animation:dapple 10s ease-in-out infinite alternate}
+@keyframes dapple{from{transform:translate(0,0)}to{transform:translate(12px,-14px)}}
+</style>
+</head>
+<body data-theme="aurora">
+<h1>HeadphoneAlarm · 界面预览</h1>
+<p class="sub">按 Compose 源码 1:1 复刻，纯静态镜像。下方切换 6 套风格主题（仅预览用，非真机渲染）</p>
+<div class="tabs">
+  <button class="on" data-tab="list">闹钟列表</button>
+  <button data-tab="edit">编辑闹钟</button>
+  <button data-tab="ring">响铃界面</button>
+</div>
+<div class="themes" id="themes">
+  <button class="on" data-theme="aurora" style="--dot:#5EE7DF">极光</button>
+  <button data-theme="cyber" style="--dot:#00F2C3">赛博朋克</button>
+  <button data-theme="material" style="--dot:#6750A4">安卓原生</button>
+  <button data-theme="anime" style="--dot:#FF78A8">动漫</button>
+  <button data-theme="ocean" style="--dot:#35E0C2">海洋</button>
+  <button data-theme="forest" style="--dot:#7EE08F">森林</button>
+</div>
+
+<div class="phone">
+  <div class="statusbar"><span>9:41</span><span>HeadphoneAlarm</span><span>▮▮▮ ⌁ 100%</span></div>
+
+  <!-- ============ 列表页 AlarmListScreen ============ -->
+  <div class="screen on" id="scr-list">
+    <div class="content">
+      <!-- Header -->
+      <div>
+        <div class="t-display">闹钟</div>
+        <div class="row" style="margin-top:6px">
+          <span class="pill active" id="hp-pill">
+            <svg viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M4 18a2 2 0 0 1-2-2v-2a2 2 0 0 1 2-2h1a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2zm14 0a2 2 0 0 0 2-2v-2a2 2 0 0 0-2-2h-1a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2z" fill="currentColor" stroke="none"/></svg>
+            <span id="hp-text">耳机已连接</span>
+          </span>
+          <span class="t-small">响铃只走耳机，不外放</span>
+        </div>
+        <div class="t-small" style="margin-top:6px">当前输出设备：蓝牙A2DP( WH-1000XM5 )、手机扬声器</div>
+      </div>
+
+      <!-- NextAlarmCard -->
+      <div class="card">
+        <div class="row gap14">
+          <div class="icon-chip"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg></div>
+          <div style="flex:1">
+            <div class="t-small" style="font-size:12.5px;font-weight:500">下一次响铃</div>
+            <div class="t-title" style="font-size:20px;font-weight:600;margin-top:4px" id="next-desc">今天 07:00</div>
+            <div class="t-small t-violet" style="margin-top:2px" id="next-count">6 小时 18 分 42 秒后 · 共 2 个启用</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PermissionNotice -->
+      <div class="card" id="perm-card">
+        <div class="row" style="gap:12px">
+          <svg width="24" height="24" viewBox="0 0 24 24" style="stroke:var(--aurora-violet);fill:none;stroke-width:1.8;stroke-linecap:round;flex-shrink:0"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6M4.5 4.5 2 7M19.5 4.5 22 7"/></svg>
+          <div style="flex:1">
+            <div class="t-title">需要补充授权</div>
+            <div class="t-small">缺少权限可能导致闹钟不准时或无法全屏提醒</div>
+          </div>
+        </div>
+        <div style="margin-top:8px">
+          <button class="perm-action">开启「精确闹钟」权限（否则响铃可能不准时）</button>
+          <button class="perm-action">关闭电池优化（否则锁屏后可能被系统压制）</button>
+          <button class="perm-action">允许全屏提醒（锁屏时直接弹出闹钟界面）</button>
+        </div>
+      </div>
+
+      <!-- XiaomiNotice -->
+      <div class="card">
+        <div class="row" style="gap:12px">
+          <svg width="24" height="24" viewBox="0 0 24 24" style="stroke:var(--aurora-violet);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg>
+          <div style="flex:1">
+            <div class="t-title">小米 / HyperOS 必做设置</div>
+            <div class="t-small">缺任意一项都可能导致到点不响、不弹界面</div>
+          </div>
+        </div>
+        <div class="t-small" style="margin-top:10px;white-space:pre-line;line-height:1.7">在「应用信息」页里逐项开启：
+① 自启动 → 允许
+② 省电策略 → 无限制
+③ 后台弹出界面 → 允许（锁屏弹出闹钟的关键）
+④ 锁屏显示 → 允许
+⑤ 蓝牙耳机需在响铃前保持已连接</div>
+        <button class="perm-action" style="margin-top:4px">打开应用信息页去设置</button>
+      </div>
+
+      <div class="sec-title">我的闹钟（3）</div>
+
+      <!-- AlarmCard 1 -->
+      <div class="card" style="cursor:pointer">
+        <div class="row" style="align-items:center">
+          <div style="flex:1">
+            <div style="font-size:40px;font-weight:300;line-height:46px">07:00</div>
+            <div class="row" style="margin-top:4px">
+              <span class="t-body" style="color:var(--text-secondary)">每天</span>
+              <span class="t-body t-violet">· 起床</span>
+            </div>
+            <div class="t-small t-cyan" style="margin-top:6px;opacity:.85">下次 6小时18分后</div>
+            <div class="row" style="margin-top:8px">
+              <span class="pill active"><svg viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg>仅耳机</span>
+              <span class="pill inactive"><svg viewBox="0 0 24 24"><path d="M13 3 5 13h5l-1 8 8-10h-5z"/></svg>震动</span>
+            </div>
+            <div class="t-small t-cyan" style="margin-top:6px;opacity:.75">护耳渐强 · 30 秒 → 85%</div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center">
+            <div class="play-btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z"/></svg></div>
+            <div class="switch on" onclick="toggleSwitch(this)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AlarmCard 2 -->
+      <div class="card" style="cursor:pointer">
+        <div class="row" style="align-items:center">
+          <div style="flex:1">
+            <div style="font-size:40px;font-weight:300;line-height:46px">12:30</div>
+            <div class="row" style="margin-top:4px">
+              <span class="t-body" style="color:var(--text-secondary)">周一至周五</span>
+              <span class="t-body t-violet">· 吃药</span>
+            </div>
+            <div class="t-small t-cyan" style="margin-top:6px;opacity:.85">下次 2小时48分后</div>
+            <div class="row" style="margin-top:8px">
+              <span class="pill active"><svg viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg>仅耳机</span>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center">
+            <div class="play-btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z"/></svg></div>
+            <div class="switch on" onclick="toggleSwitch(this)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AlarmCard 3（已禁用，alpha 0.55） -->
+      <div class="card disabled-card" style="cursor:pointer">
+        <div class="row" style="align-items:center">
+          <div style="flex:1">
+            <div style="font-size:40px;font-weight:300;line-height:46px;color:var(--text-secondary)">23:00</div>
+            <div class="row" style="margin-top:4px">
+              <span class="t-body" style="color:var(--text-secondary)">仅一次</span>
+              <span class="t-body t-violet">· 关电脑</span>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <span class="pill inactive"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>允许外放</span>
+              <span class="pill inactive"><svg viewBox="0 0 24 24"><path d="M13 3 5 13h5l-1 8 8-10h-5z"/></svg>震动</span>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;align-items:center">
+            <div class="play-btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z"/></svg></div>
+            <div class="switch" onclick="toggleSwitch(this)"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FooterHint -->
+      <div class="footer-banner">
+        <div class="row" style="gap:12px;align-items:flex-start">
+          <svg width="22" height="22" viewBox="0 0 24 24" style="stroke:var(--aurora-violet);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;margin-top:2px"><path d="M4 11a8 8 0 0 1 16 0v6a2 2 0 0 1-2 2h-1v-7h3M4 11v6a2 2 0 0 0 2 2h1v-7H4M2 20h20"/></svg>
+          <span class="t-small" style="line-height:1.6">睡前插好耳机再开始休息。若响铃时耳机未连接，应用会保持静默并等待耳机接入，绝不会从扬声器出声。</span>
+        </div>
+        <div class="t-small" style="margin-top:10px;line-height:1.6">锁屏可靠性：本应用使用系统精确闹钟 + 前台服务 + 全屏提醒，并持有唤醒锁，锁屏、息屏后仍会正常响铃。建议先实测一次。</div>
+        <button class="perm-action" style="display:flex;align-items:center;gap:6px">
+          <svg width="16" height="16" viewBox="0 0 24 24" style="stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4M9 2h6"/></svg>
+          测试锁屏响铃（1 分钟后）
+        </button>
+      </div>
+    </div>
+    <div class="fab"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建闹钟</div>
+  </div>
+
+  <!-- ============ 编辑页 AlarmEditScreen ============ -->
+  <div class="screen" id="scr-edit">
+    <div class="content" style="padding-top:0;gap:16px">
+      <div class="topbar">
+        <div class="back"><svg viewBox="0 0 24 24"><path d="M19 12H5M11 18l-6-6 6-6"/></svg></div>
+        <b>编辑闹钟</b>
+      </div>
+
+      <!-- TimeWheel -->
+      <div class="card">
+        <div class="wheel-wrap">
+          <div class="wheel-mask"></div>
+          <div class="sel-bar"></div>
+          <div class="wheel" id="wheel-h"></div>
+          <span class="colon">:</span>
+          <div class="wheel" id="wheel-m"></div>
+        </div>
+        <div class="t-small" style="margin-top:10px" id="wheel-repeat">重复：每天</div>
+      </div>
+
+      <div class="sec-title">标签</div>
+      <div class="card"><input class="textfield" placeholder="例如：起床、吃药" value="起床"></div>
+
+      <div class="sec-title">重复</div>
+      <div class="card">
+        <div class="days" id="day-sel"></div>
+        <div class="row" style="margin-top:12px;gap:10px">
+          <span class="chip">仅一次</span><span class="chip">每天</span><span class="chip">工作日</span><span class="chip">周末</span>
+        </div>
+      </div>
+
+      <div class="sec-title">铃声</div>
+      <div class="card" id="tone-card">
+        <!-- JS 渲染 ToneRow 列表 -->
+        <button class="btn-violet" style="margin-top:10px"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>从本地选择音频文件</button>
+      </div>
+
+      <div class="sec-title">耳机播放</div>
+      <div class="card">
+        <div class="row" style="padding:10px 0">
+          <div class="icon-chip sm"><svg viewBox="0 0 24 24" style="stroke:var(--aurora-cyan)"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg></div>
+          <div style="flex:1;margin-left:14px">
+            <div class="t-body" style="font-size:16px">仅通过耳机播放</div>
+            <div class="t-small">强制把闹钟音频路由到已连接的耳机，绝不经扬声器外放</div>
+          </div>
+          <div class="switch on" onclick="toggleSwitch(this);document.getElementById('no-hp-area').style.display=this.classList.contains('on')?'block':'none'"></div>
+        </div>
+        <div id="no-hp-area">
+          <div class="t-small" style="font-size:12.5px;font-weight:500;margin:6px 0 8px">未检测到耳机时</div>
+          <div class="seg" id="seg-nohp">
+            <div class="on">静默等待</div><div>仅震动</div><div>允许外放</div>
+          </div>
+          <div class="t-small" style="margin-top:8px;line-height:1.6">闹钟会保持静默，一旦耳机接入立即开始播放，全程不会外放。</div>
+        </div>
+      </div>
+
+      <div class="sec-title">护耳音量</div>
+      <div class="card">
+        <div class="row" style="margin-top:6px">
+          <svg width="19" height="19" viewBox="0 0 24 24" style="stroke:var(--aurora-cyan);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><path d="M3 17l6-6 4 4 8-8M15 7h6v6"/></svg>
+          <div style="flex:1;margin-left:10px;font-size:16px">音量渐强时长</div>
+          <b class="t-cyan" style="font-weight:500">30 秒</b>
+        </div>
+        <div class="slider-line"><i class="fill" style="width:25%"></i><i class="thumb" style="left:calc(25% - 7px)"></i></div>
+        <div class="row" style="margin-top:14px">
+          <svg width="19" height="19" viewBox="0 0 24 24" style="stroke:var(--aurora-cyan);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><path d="M11 5 6 9H2v6h4l5 4zM22 9l-6 6M16 9l6 6"/></svg>
+          <div style="flex:1;margin-left:10px;font-size:16px">起始音量</div>
+          <b class="t-cyan" style="font-weight:500">5%</b>
+        </div>
+        <div class="slider-line"><i class="fill" style="width:14%"></i><i class="thumb" style="left:calc(14% - 7px)"></i></div>
+        <div class="row" style="margin-top:14px">
+          <svg width="19" height="19" viewBox="0 0 24 24" style="stroke:var(--aurora-cyan);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9.5 9.5 0 0 1 0 13"/></svg>
+          <div style="flex:1;margin-left:10px;font-size:16px">最高音量</div>
+          <b class="t-cyan" style="font-weight:500">85%</b>
+        </div>
+        <div class="slider-line"><i class="fill" style="width:81%"></i><i class="thumb" style="left:calc(81% - 7px)"></i></div>
+        <div class="t-small" style="margin-top:6px;line-height:1.6">响铃从 5% 开始，在 30 秒内平缓升到 85%。音量按听感匀速上升，不会前几秒突然变响。</div>
+      </div>
+
+      <div class="sec-title">提示方式</div>
+      <div class="card">
+        <div class="row" style="padding:10px 0">
+          <div class="icon-chip sm"><svg viewBox="0 0 24 24" style="stroke:var(--aurora-cyan)"><rect x="7" y="3" width="10" height="18" rx="3"/><path d="M4 8v8M20 8v8"/></svg></div>
+          <div style="flex:1;margin-left:14px">
+            <div class="t-body" style="font-size:16px">震动提醒</div>
+            <div class="t-small">与声音同时进行</div>
+          </div>
+          <div class="switch on" onclick="toggleSwitch(this)"></div>
+        </div>
+      </div>
+
+      <div class="sec-title">贪睡与超时</div>
+      <div class="card">
+        <div class="row" style="padding:10px 0 6px">
+          <div class="icon-chip sm"><svg viewBox="0 0 24 24" style="stroke:var(--aurora-cyan)"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/><path d="M17.5 4.5 19.5 2"/></svg></div>
+          <div style="flex:1;margin-left:14px">
+            <div class="t-body" style="font-size:16px">贪睡时长</div>
+            <div class="t-small">点击贪睡后再次响铃的间隔</div>
+          </div>
+          <b class="t-cyan" style="font-weight:500">5 分钟</b>
+        </div>
+        <div class="seg"><div>1</div><div class="on">5</div><div>10</div><div>15</div></div>
+        <div class="row" style="padding:14px 0 6px">
+          <div class="icon-chip sm"><svg viewBox="0 0 24 24" style="stroke:var(--aurora-cyan)"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg></div>
+          <div style="flex:1;margin-left:14px">
+            <div class="t-body" style="font-size:16px">自动停止</div>
+            <div class="t-small">持续无人操作时自动关闭</div>
+          </div>
+          <b class="t-cyan" style="font-weight:500">10 分钟</b>
+        </div>
+        <div class="seg"><div>5</div><div class="on">10</div><div>15</div><div>30</div></div>
+      </div>
+
+      <button class="btn">保存</button>
+      <div class="del-row" style="justify-content:center"><svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>删除这个闹钟</div>
+    </div>
+  </div>
+
+  <!-- ============ 响铃页 AlarmRingActivity ============ -->
+  <div class="screen ring-screen" id="scr-ring">
+    <div class="ring-wrap">
+      <div class="ring-icon"><svg viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg></div>
+      <div class="ring-time">07:00</div>
+      <div class="t-title t-violet" style="margin-top:6px;font-size:20px;font-weight:600">起床</div>
+      <div class="ring-status">
+        <svg viewBox="0 0 24 24"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><path d="M2 14h3v6H4a2 2 0 0 1-2-2zm17 0h3v4a2 2 0 0 1-2 2h-1z"/></svg>
+        正在耳机中响铃 · WH-1000XM5
+      </div>
+      <div class="ramp">
+        <div class="row" style="justify-content:space-between">
+          <span class="t-cyan" style="font-size:11.5px;font-weight:500">音量渐强中</span>
+          <span class="t-small" style="font-size:11.5px">18s 后到 85%</span>
+        </div>
+        <div class="bar" style="margin-top:8px"><i></i></div>
+      </div>
+      <div style="width:100%;margin-top:44px;display:flex;flex-direction:column;gap:14px">
+        <button class="btn-ring" style="background:var(--aurora-violet);color:var(--on-violet)">
+          <svg viewBox="0 0 24 24"><path d="M13 3 5 13h5l-1 8 8-10h-5zM17 4h5M17 8h3.5M18.5 20H22M19 16h2"/></svg>
+          贪睡 5 分钟
+        </button>
+        <button class="btn-ring" style="background:var(--chip-solid);color:var(--text-primary)">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4M9 2h6M4 4 2 6M20 4l2 2M3 21 21 3"/></svg>
+          关闭闹钟
+        </button>
+      </div>
+      <div class="t-small" style="margin-top:28px">声音仅在耳机中播放</div>
+    </div>
+  </div>
+</div>
+
+<p class="note">交互说明：列表页开关可点、耳机状态自动跟随系统是否连接蓝牙耳机模拟；编辑页滚轮可上下拖动切换时间、星期/分段控件可点选。<br>本页面为静态镜像，实际渲染以真机 Compose 为准。</p>
+
+<script>
+/* ===== Tab 切换 ===== */
+document.querySelectorAll('.tabs button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('on'));
+    document.getElementById('scr-'+b.dataset.tab).classList.add('on');
+  };
+});
+function toggleSwitch(el){el.classList.toggle('on')}
+
+/* ===== 主题切换 ===== */
+document.querySelectorAll('#themes button').forEach(b=>{
+  b.onclick=()=>{
+    document.body.dataset.theme=b.dataset.theme;
+    document.querySelectorAll('#themes button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+  };
+});
+
+/* ===== 耳机状态模拟（对应 HeadphoneDetector 回调） ===== */
+function setHeadphone(connected){
+  const pill=document.getElementById('hp-pill'),txt=document.getElementById('hp-text');
+  pill.classList.toggle('active',connected);pill.classList.toggle('inactive',!connected);
+  txt.textContent=connected?'耳机已连接':'未检测到耳机';
+}
+setHeadphone(navigator.userAgent.includes('like Gecko')); // 默认展示已连接态
+
+/* ===== 下一次响铃倒计时（对应 rememberTickingNow 每秒推进） ===== */
+function tick(){
+  const now=new Date();
+  const next=new Date(now);next.setHours(7,0,0,0);
+  if(next<=now)next.setDate(next.getDate()+1);
+  const diff=next-now;
+  const h=Math.floor(diff/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);
+  const pad=n=>String(n).padStart(2,'0');
+  document.getElementById('next-desc').textContent=`今天 07:00`;
+  document.getElementById('next-count').textContent=`${h} 小时 ${pad(m)} 分 ${pad(s)} 秒后 · 共 2 个启用`;
+}
+setInterval(tick,1000);tick();
+
+/* ===== 时间滚轮（对应 WheelPicker：54px 行高、5 行可见、中间选中、拖拽吸附） ===== */
+function makeWheel(el,count,selected,suffix){
+  let cur=selected;const H=54;
+  el.innerHTML='<ul>'+Array.from({length:count},(_,i)=>`<li>${String(i).padStart(2,'0')}${suffix||''}</li>`).join('')+'</ul>';
+  const ul=el.querySelector('ul');
+  function render(){
+    ul.style.transform=`translateY(${108-(cur*H)}px)`;
+    el.querySelectorAll('li').forEach((li,i)=>li.classList.toggle('sel',i===cur));
+  }
+  render();
+  let drag=false,startY=0,startOff=0,vel=0,lastY=0,lastT=0;
+  const onDown=y=>{drag=true;startY=y;startOff=-parseFloat(ul.style.transform.match(/-?[\d.]+/)?.[0]||0)-108+cur*H;vel=0;lastY=y;lastT=performance.now();ul.style.transition='none'};
+  const onMove=y=>{
+    if(!drag)return;
+    const t=performance.now();vel=y-lastY;lastY=y;
+    const offset=startOff+(y-startY);
+    ul.style.transform=`translateY(${offset-0}px)`;
+    const idx=Math.round(offset/H);
+    if(Math.abs(idx-cur)>0){cur=Math.max(0,Math.min(count-1,idx));render();ul.style.transform=`translateY(${108-(cur*H)}px)`}
+  };
+  const onUp=()=>{drag=false;ul.style.transition='transform .18s ease-out';render()};
+  el.addEventListener('mousedown',e=>onDown(e.clientY));
+  addEventListener('mousemove',e=>onMove(e.clientY));
+  addEventListener('mouseup',onUp);
+  el.addEventListener('touchstart',e=>onDown(e.touches[0].clientY),{passive:true});
+  el.addEventListener('touchmove',e=>onMove(e.touches[0].clientY),{passive:true});
+  el.addEventListener('touchend',onUp);
+  el.addEventListener('wheel',e=>{e.preventDefault();cur=Math.max(0,Math.min(count-1,cur+(e.deltaY>0?1:-1)));render()},{passive:false});
+  return{get:()=>cur};
+}
+const wh=makeWheel(document.getElementById('wheel-h'),24,7);
+const wm=makeWheel(document.getElementById('wheel-m'),60,30);
+function syncWheel(){
+  document.getElementById('wheel-repeat').textContent=
+    document.querySelector('#day-sel .on')?'重复：每天':'仅在下次触发';
+}
+
+/* ===== 星期选择（对应 DaySelector，选中青色/未选缩放 0.94） ===== */
+const daySel=document.getElementById('day-sel');
+['一','二','三','四','五','六','日'].forEach((d,i)=>{
+  const el=document.createElement('div');
+  el.textContent=d;el.dataset.day=i+1;
+  el.onclick=()=>{el.classList.toggle('on');syncWheel()};
+  daySel.appendChild(el);
+});
+
+/* ===== 铃声列表（对应 BuiltInTones.ALL + 默认项） ===== */
+const tones=[
+  ['系统默认闹钟','跟随系统闹钟提示音',true],
+  ['轻柔提示 · 清风','三度上行琶音，结尾双音确认',false],
+  ['脉冲节拍','稳定 90 BPM 软脉冲，节奏感强',false],
+  ['回声钟鸣','带混响尾音的单音钟声',false],
+  ['晨间和弦','四音上行的明亮和弦',false],
+  ['起床进行曲.mp3','来自本地文件',false],
+];
+const toneCard=document.getElementById('tone-card');
+const btnLocal=toneCard.querySelector('.btn-violet');
+tones.forEach(([name,desc,sel])=>{
+  const row=document.createElement('div');row.className='tone-row';
+  row.innerHTML=`<div class="radio${sel?' on':''}"></div>
+    <div style="flex:1"><div style="font-size:16px">${name}</div><div class="t-small">${desc}</div></div>
+    <div class="play-btn"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z"/></svg></div>`;
+  row.onclick=()=>{toneCard.querySelectorAll('.radio').forEach(r=>r.classList.remove('on'));row.querySelector('.radio').classList.add('on')};
+  toneCard.insertBefore(row,btnLocal);
+});
+
+/* ===== 分段选择器通用点选 ===== */
+document.querySelectorAll('.seg').forEach(seg=>{
+  seg.addEventListener('click',e=>{
+    const opt=[...seg.children].find(x=>x===e.target||x.contains(e.target));
+    if(!opt)return;
+    seg.querySelectorAll('div').forEach(x=>x.classList.remove('on'));opt.classList.add('on');
+  });
+});
+</script>
+</body>
+</html>
