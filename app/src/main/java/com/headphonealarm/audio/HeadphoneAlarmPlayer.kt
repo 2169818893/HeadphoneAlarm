@@ -156,9 +156,9 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0) }
         mediaVolumeRaised = true
         mediaPlayer?.let { mp ->
-            val target = ((alarm?.maxVolumePercent ?: 100) / 100f).coerceIn(MIN_VOLUME, 1f)
+            val targetGain = percentToGain((alarm?.maxVolumePercent ?: 100) / 100f)
             rampJob?.cancel()
-            runCatching { mp.setVolume(target, target) }
+            runCatching { mp.setVolume(targetGain, targetGain) }
             emitVolume(1f)
         }
     }
@@ -174,10 +174,13 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     // region 内部实现
 
     private fun play(alarm: AlarmItem, device: AudioDeviceInfo?, enforceHeadphone: Boolean) {
-        val viaBluetooth = isBluetooth(device)
-        // 蓝牙 A2DP 只承载媒体流：USAGE_ALARM 会被系统强制留在机身扬声器，
-        // 导致耳机无声 + 误判为“未走耳机”而反复静音。目标为蓝牙时改用 USAGE_MEDIA。
-        val usage = if (viaBluetooth) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_ALARM
+        // 走耳机时统一使用 USAGE_MEDIA：
+        // 1. 蓝牙 A2DP 只承载媒体流，USAGE_ALARM 会被系统强制留在机身扬声器；
+        // 2. 部分机型为保证响铃可靠性把闹钟流锁在扬声器，插着有线耳机也会外放；
+        //    而媒体流在插入有线 / USB / 蓝牙耳机后路由到耳机是所有 ROM 的标准行为。
+        // 外放模式保持 USAGE_ALARM：扬声器上闹钟流响度最大且不受媒体音量影响。
+        val useMediaStream = enforceHeadphone
+        val usage = if (useMediaStream) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_ALARM
         val attributes = AudioAttributes.Builder()
             .setUsage(usage)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -203,8 +206,8 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             }
 
         requestFocus(attributes)
-        // 蓝牙走媒体流：媒体音量几乎为 0 时耳机听不见，响铃前临时抬到下限
-        if (viaBluetooth) ensureMediaVolume()
+        // 走媒体流：媒体音量几乎为 0 时耳机听不见，响铃前临时抬到下限
+        if (useMediaStream) ensureMediaVolume()
         if (alarm.vibrate) startVibration(alarm)
 
         if (enforceHeadphone) {
@@ -218,15 +221,6 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         }
 
         emit(State.Playing(viaHeadphone = enforceHeadphone, deviceName = device?.productName?.toString()))
-    }
-
-    /** 目标输出是否为蓝牙设备：蓝牙 A2DP 只承载媒体流，需据此改变音频 usage */
-    private fun isBluetooth(device: AudioDeviceInfo?): Boolean {
-        val type = device?.type ?: return false
-        return type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                type == AudioDeviceInfo.TYPE_BLE_HEADSET)
     }
 
     /** 走媒体流时，媒体音量过低会导致耳机几乎无声，临时抬到下限，停止后恢复 */
@@ -298,33 +292,46 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     private fun startVolumeRamp(player: MediaPlayer, alarm: AlarmItem) {
         rampJob?.cancel()
 
-        val target = (alarm.maxVolumePercent / 100f).coerceIn(MIN_VOLUME, 1f)
+        // 百分比必须先经 percentToGain 换算成线性增益，不能直接当 setVolume 用
+        val targetGain = percentToGain(alarm.maxVolumePercent / 100f)
         val rampSeconds = alarm.volumeRampSeconds.coerceIn(0, MAX_RAMP_SECONDS)
-        val from = (alarm.rampStartPercent / 100f).coerceIn(MIN_VOLUME, target)
+        val fromGain = percentToGain(alarm.rampStartPercent / 100f).coerceAtMost(targetGain)
 
-        if (rampSeconds == 0 || from >= target) {
-            runCatching { player.setVolume(target, target) }
+        if (rampSeconds == 0 || fromGain >= targetGain) {
+            runCatching { player.setVolume(targetGain, targetGain) }
             emitVolume(1f)
             return
         }
 
-        runCatching { player.setVolume(from, from) }
+        runCatching { player.setVolume(fromGain, fromGain) }
         emitVolume(0f)
 
         rampJob = scope.launch {
             val steps = rampSeconds * STEPS_PER_SECOND
-            val ratio = target / from
+            val ratio = targetGain / fromGain
             repeat(steps) { index ->
                 delay(STEP_INTERVAL_MS)
                 val progress = (index + 1).toFloat() / steps
-                val volume = from * ratio.pow(progress)
+                val volume = fromGain * ratio.pow(progress)
                 runCatching { player.setVolume(volume, volume) }
                 emitVolume(progress)
             }
-            runCatching { player.setVolume(target, target) }
+            runCatching { player.setVolume(targetGain, targetGain) }
             emitVolume(1f)
         }
     }
+
+    /**
+     * 感知音量百分比（0~1）→ MediaPlayer.setVolume 的线性增益。
+     *
+     * 原理：`setVolume` 是线性振幅缩放，把「20%」直接当 0.2 用只衰减约 14dB，
+     * 听感依然非常响；而人耳响度感知与 dB 近似线性，系统音量条的 20% 实际
+     * 对应约 -30dB。因此按 dB 换算：`gain = 10^((p-1)·RANGE_DB/20)`，
+     * RANGE_DB 取 40dB 与主流 ROM 音量曲线跨度一致，使「上限 20%」的
+     * 听感与系统音量条拉到 20% 相当。
+     */
+    private fun percentToGain(percent: Float): Float =
+        10f.pow((percent.coerceIn(MIN_VOLUME_PERCENT, 1f) - 1f) * VOLUME_RANGE_DB / 20f)
 
     private fun emitVolume(progress: Float) {
         volumeListener?.invoke(progress)
@@ -353,7 +360,13 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             var offHeadphoneStreak = 0
             while (isActive) {
                 delay(ROUTE_CHECK_INTERVAL_MS)
-                val routed = runCatching { player.routedDevice }.getOrNull()
+                // getRoutedDevice 是 API 28：低版本视为路由未知（null），
+                // 走宽限期后信任耳机在线的既有兜底，行为不变
+                val routed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    runCatching { player.routedDevice }.getOrNull()
+                } else {
+                    null
+                }
                 when {
                     detector.isHeadphone(routed) -> {
                         offHeadphoneStreak = 0
@@ -402,7 +415,8 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun attachRoutingGuard(player: MediaPlayer) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        // MediaPlayer 的 addOnRoutingChangedListener 是 API 28
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         val listener = AudioRouting.OnRoutingChangedListener { router ->
             // 路由事件多为蓝牙唤醒/临时回落扬声器的瞬时抖动，不在此直接判“外放”，
             // 只重新声明首选设备；是否静音交给 startRouteMonitor 的稳定判定，避免提示闪烁。
@@ -509,7 +523,9 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun releaseRoutingListener() {
-        routingListener?.let { listener ->
+        val listener = routingListener ?: return
+        // removeOnRoutingChangedListener 同为 API 28；listener 只会在 28+ 被赋值，双保险
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { mediaPlayer?.removeOnRoutingChangedListener(listener) }
         }
         routingListener = null
@@ -543,8 +559,12 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     // endregion
 
     private companion object {
-        /** 音量下限，约 -46dB，保证可闻又不惊扰 */
-        const val MIN_VOLUME = 0.005f
+        /** 音量百分比下限（1%），经 dB 映射后约 -40dB，保证可闻又不惊扰 */
+        const val MIN_VOLUME_PERCENT = 0.01f
+
+        /** 感知音量曲线的总 dB 跨度：100% → 0dB，1% → -40dB */
+        const val VOLUME_RANGE_DB = 40f
+
         const val MAX_RAMP_SECONDS = 120
         const val STEPS_PER_SECOND = 20
         const val STEP_INTERVAL_MS = 50L
@@ -558,8 +578,12 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         /** 连续多少次巡检都落在非耳机才判定为“确实外放”，用于避开蓝牙唤醒抖动 */
         const val OFF_HEADPHONE_STREAK_LIMIT = 4
 
-        /** 走媒体流时的媒体音量下限（占最大音量的比例） */
-        const val MUSIC_VOLUME_FLOOR = 0.7f
+        /**
+         * 走媒体流时的媒体音量下限（占最大音量的比例）。
+         * 取 0.5：耳机普遍灵敏度高，50% 媒体音量已清晰可闻，
+         * 同时避免把系统音量条拉得过高让用户误以为音量失控。
+         */
+        const val MUSIC_VOLUME_FLOOR = 0.5f
         val VIBRATION_PATTERN = longArrayOf(0L, 700L, 500L, 700L, 900L)
     }
 }

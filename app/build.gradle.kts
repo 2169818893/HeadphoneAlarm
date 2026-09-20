@@ -12,8 +12,8 @@ android {
         applicationId = "com.headphonealarm"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
         vectorDrawables { useSupportLibrary = true }
     }
 
@@ -74,4 +74,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 纯逻辑单元测试（下次触发时间 / 时间工具）
+    testImplementation("junit:junit:4.13.2")
 }

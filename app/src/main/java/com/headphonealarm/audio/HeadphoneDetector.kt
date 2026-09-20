@@ -46,6 +46,7 @@ class HeadphoneDetector(context: Context) {
      * 查找一个最适合作为闹钟输出的耳机设备。
      * 优先有线（路由最稳定），其次蓝牙，最后其它类型。
      */
+    @Suppress("InlinedApi") // 新类型常量在编译期内联，低版本运行时 getDevices 不会返回它们
     fun findHeadphone(): AudioDeviceInfo? {
         val outputs = runCatching {
             audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)

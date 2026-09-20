@@ -761,9 +761,9 @@ class AlarmEditViewModel(
                 vibrate = false,
                 // 试听铃声时不渐强，直接听到完整音色
                 volumeRampSeconds = 0,
-                // 试听必须能听到：走当前默认输出（有耳机走耳机、无耳机走扬声器）。
-                // 强制 headphoneOnly 会让未连耳机时点试听一直静默，用户误以为音频损坏。
-                headphoneOnly = false
+                // 试听与真实响铃一致：只走耳机、无耳机时静默等待并提示，绝不外放
+                headphoneOnly = true,
+                noHeadphoneAction = NoHeadphoneAction.WAIT
             ),
             onState = { state -> reportPreviewState(state) }
         )
@@ -773,7 +773,8 @@ class AlarmEditViewModel(
     private fun reportPreviewState(state: HeadphoneAlarmPlayer.State) {
         _message.value = when (state) {
             is HeadphoneAlarmPlayer.State.Failed -> "试听失败：${state.reason}"
-            is HeadphoneAlarmPlayer.State.WaitingHeadphone -> state.reason
+            is HeadphoneAlarmPlayer.State.WaitingHeadphone ->
+                "未检测到耳机，试听不会外放：${state.reason}"
             is HeadphoneAlarmPlayer.State.Playing -> null
             else -> _message.value
         }

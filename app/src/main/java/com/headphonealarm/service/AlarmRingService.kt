@@ -226,8 +226,10 @@ class AlarmRingService : Service() {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType())
             }
         } else {
-            // 通知权限被拒绝时不应中断响铃，仅忽略本次刷新
-            runCatching { NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification) }
+            // 通知权限被拒时显式跳过（Lint 要求），不中断响铃
+            if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+                runCatching { NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification) }
+            }
         }
     }
 

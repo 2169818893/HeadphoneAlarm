@@ -97,9 +97,14 @@ object AlarmPermissions {
 
     /** 需要在运行时申请的通知权限 */
     fun runtimePermissions(): Array<String> =
+        notificationPermission()?.let { arrayOf(it) } ?: emptyArray()
+
+    /** 通知权限名，仅 Android 13+ 需要运行时申请，低版本返回 null */
+    @Suppress("InlinedApi") // 常量在编译期内联，仅在 SDK 33+ 分支内使用
+    fun notificationPermission(): String? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS)
+            Manifest.permission.POST_NOTIFICATIONS
         } else {
-            emptyArray()
+            null
         }
 }

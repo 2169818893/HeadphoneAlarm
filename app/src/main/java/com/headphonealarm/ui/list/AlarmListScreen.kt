@@ -68,6 +68,7 @@ import com.headphonealarm.AlarmApp
 import com.headphonealarm.audio.HeadphoneAlarmPlayer
 import com.headphonealarm.audio.HeadphoneDetector
 import com.headphonealarm.data.AlarmItem
+import com.headphonealarm.data.NoHeadphoneAction
 import com.headphonealarm.ui.components.GlassCard
 import com.headphonealarm.ui.components.SectionTitle
 import com.headphonealarm.ui.components.StatusPill
@@ -189,7 +190,9 @@ fun AlarmListScreen(
                                 AlarmPermissions.exactAlarmSettingsIntent(context)
                             )
                         },
-                        onFixNotification = { notificationLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS) },
+                        onFixNotification = {
+                            AlarmPermissions.notificationPermission()?.let(notificationLauncher::launch)
+                        },
                         onFixFullScreen = {
                             AlarmPermissions.openSettingsSafely(
                                 context,
@@ -764,7 +767,7 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private var previewPlayer: HeadphoneAlarmPlayer? = null
-    var previewingId by mutableStateOf(-1L)
+    var previewingId by mutableLongStateOf(-1L)
         private set
 
     /** 试听 / 测试的反馈信息，让失败不再静默 */
@@ -811,9 +814,10 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
             alarm = alarm.copy(
                 enabled = true,
                 vibrate = false,
-                // 试听必须能听到：走当前默认输出（有耳机走耳机、无耳机走扬声器），
-                // 否则未连耳机时点试听永远静默，用户会以为闹钟坏了。
-                headphoneOnly = false,
+                // 试听与真实响铃一致：只走耳机、无耳机时静默等待并提示，绝不外放。
+                // 闹钟本身若设了「允许外放」，试听也仍然只在耳机中出声。
+                headphoneOnly = true,
+                noHeadphoneAction = NoHeadphoneAction.WAIT,
                 // 试听同样演示渐强效果，压缩到 5 秒以便在 6 秒内听完
                 volumeRampSeconds = 5
             ),
@@ -825,7 +829,7 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
                     }
 
                     is HeadphoneAlarmPlayer.State.WaitingHeadphone ->
-                        _message.value = state.reason
+                        _message.value = "未检测到耳机，试听不会外放：${state.reason}"
 
                     is HeadphoneAlarmPlayer.State.Playing -> _message.value = null
                     else -> Unit
