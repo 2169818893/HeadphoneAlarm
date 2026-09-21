@@ -47,6 +47,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -141,6 +142,20 @@ fun AlarmEditScreen(
             )
         }
     ) { scaffoldPadding ->
+        // 等数据加载完成再渲染：ViewModel 异步读取闹钟，若先用默认值（7:30）组合，
+        // 数据到达后再跳变，滚轮的 animate 同步会闪跳；加载通常在毫秒级完成。
+        if (!state.loaded) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = scaffoldPadding.calculateTopPadding()),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
+            }
+            return@Scaffold
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()

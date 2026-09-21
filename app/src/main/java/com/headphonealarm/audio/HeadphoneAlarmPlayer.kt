@@ -19,6 +19,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.headphonealarm.data.AlarmItem
 import com.headphonealarm.data.NoHeadphoneAction
@@ -141,11 +142,12 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     fun stop() = stopInternal(notify = true)
 
     /**
-     * 用户在响铃界面点按后调用：尽力把媒体音量抬到系统上限，并把播放器增益直接推到目标。
+     * 用户在响铃界面点按后调用：跳过渐强，把播放器增益直接推到目标音量。
      *
-     * 说明：Android 的“媒体音量安全”会监听耳机实际输出分贝并自动压低，App 无法用 API 绕过；
-     * 这里只在用户真实点击后重新抬升（相当于系统要求的那次“手动确认”）。若仍被压低，
-     * 需用户到系统“声音 → 媒体音量安全/降低过大音量”里关闭该保护。
+     * 媒体音量在响铃开始时已抬到系统上限；此按钮主要应对 Android 的
+     * “媒体音量安全”（监听耳机实际输出分贝并自动压低，App 无法用 API 绕过），
+     * 只在用户真实点击后重新抬升（相当于系统要求的那次“手动确认”）。若仍被
+     * 压低，需用户到系统“声音 → 媒体音量安全/降低过大音量”里关闭该保护。
      */
     fun boostToMaxVolume() {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
@@ -206,8 +208,8 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             }
 
         requestFocus(attributes)
-        // 走媒体流：媒体音量几乎为 0 时耳机听不见，响铃前临时抬到下限
-        if (useMediaStream) ensureMediaVolume()
+        // 走媒体流：抬满媒体音量，响度完全由播放器增益（音量上限）决定
+        if (useMediaStream) raiseMediaVolumeToMax()
         if (alarm.vibrate) startVibration(alarm)
 
         if (enforceHeadphone) {
@@ -223,15 +225,22 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         emit(State.Playing(viaHeadphone = enforceHeadphone, deviceName = device?.productName?.toString()))
     }
 
-    /** 走媒体流时，媒体音量过低会导致耳机几乎无声，临时抬到下限，停止后恢复 */
-    private fun ensureMediaVolume() {
+    /**
+     * 走媒体流（耳机响铃）时把媒体音量临时抬到系统最大值，停止后恢复原值。
+     *
+     * 原理：实际听感响度 = 系统媒体音量 × 播放器增益。媒体音量往往停在用户
+     * 平时听歌的水平（可能只有一半），若不抬满，渐强爬得再高也会被它封顶，
+     * 「上限 50% 以上」的设置永远无法实现。抬满之后，响度完全由播放器增益
+     * （即音量上限百分比，已按 dB 感知映射）决定，跨设备一致且渐强全程有效。
+     */
+    private fun raiseMediaVolumeToMax() {
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         if (max <= 0) return
         val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        val floor = (max * MUSIC_VOLUME_FLOOR).toInt().coerceAtLeast(1)
-        if (current < floor) {
+        if (current < max) {
             savedMusicVolume = current
-            runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, floor, 0) }
+            runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0) }
+                .onFailure { Log.w(TAG, "抬升媒体音量被系统拒绝: ${it.message}") }
             mediaVolumeRaised = true
         }
     }
@@ -559,6 +568,8 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     // endregion
 
     private companion object {
+        private const val TAG = "HeadphoneAlarmPlayer"
+
         /** 音量百分比下限（1%），经 dB 映射后约 -40dB，保证可闻又不惊扰 */
         const val MIN_VOLUME_PERCENT = 0.01f
 
@@ -578,12 +589,6 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         /** 连续多少次巡检都落在非耳机才判定为“确实外放”，用于避开蓝牙唤醒抖动 */
         const val OFF_HEADPHONE_STREAK_LIMIT = 4
 
-        /**
-         * 走媒体流时的媒体音量下限（占最大音量的比例）。
-         * 取 0.5：耳机普遍灵敏度高，50% 媒体音量已清晰可闻，
-         * 同时避免把系统音量条拉得过高让用户误以为音量失控。
-         */
-        const val MUSIC_VOLUME_FLOOR = 0.5f
         val VIBRATION_PATTERN = longArrayOf(0L, 700L, 500L, 700L, 900L)
     }
 }

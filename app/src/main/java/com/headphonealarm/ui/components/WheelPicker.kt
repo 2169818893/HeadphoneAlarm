@@ -14,7 +14,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -67,21 +69,36 @@ fun WheelPicker(
         }
     }
 
-    // 滚动 -> 向外通知
+    /** 程序化滚动（外部同步）期间挂起通知，避免 onSelected 回环打断动画 */
+    val isProgrammaticScroll = remember { mutableStateOf(false) }
+
+    // 用户滚动 -> 向外通知（程序化同步期间不通知，否则会形成回环）：
+    // 外部值变化 -> animateScrollToItem -> 滚动途中每跨一项触发 onSelected ->
+    // 外部 state 被改成途中值 -> LaunchedEffect(selectedIndex) 重启并取消动画 -> 卡在中间
     LaunchedEffect(listState, itemHeightPx) {
         snapshotFlow { snappedIndex }
             .distinctUntilChanged()
             .map { it.coerceIn(items.indices) }
             .collect { index ->
-                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                onSelected(index)
+                if (!isProgrammaticScroll.value) {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onSelected(index)
+                }
             }
     }
 
-    // 外部值变化 -> 同步滚动（与上一步互斥，不会产生回环）
+    // 外部值变化 -> 同步滚动
     LaunchedEffect(selectedIndex) {
         val target = selectedIndex.coerceIn(items.indices)
-        if (snappedIndex != target) listState.animateScrollToItem(target)
+        if (snappedIndex != target) {
+            isProgrammaticScroll.value = true
+            try {
+                listState.animateScrollToItem(target)
+            } finally {
+                // 用户手势可能取消动画，必须保证标志复位，否则后续用户滚动被永久抑制
+                isProgrammaticScroll.value = false
+            }
+        }
     }
 
     Box(
