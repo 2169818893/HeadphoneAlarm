@@ -9,7 +9,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.text.format.DateFormat
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
@@ -78,6 +80,9 @@ class AlarmRingService : Service() {
                 if (id < 0) {
                     stopSelf()
                 } else {
+                    // 同步持锁：必须在进入任何协程/异步读盘之前就握住 CPU，否则息屏后
+                    // CPU 可能在读取闹钟数据、启动播放器之前挂起，造成「后台不响、切回前台才响」。
+                    acquireWakeLock()
                     // 系统要求 startForegroundService 后 5 秒内进入前台，
                     // 先用占位通知抢占，再异步读取闹钟数据，避免超时崩溃
                     startForegroundPlaceholder()
@@ -255,7 +260,19 @@ class AlarmRingService : Service() {
     private fun snooze() {
         val item = alarm ?: return dismiss()
         app.alarmScheduler.scheduleSnooze(item, item.snoozeMinutes)
+        // 一次性闹钟触发即被消费、列表开关显示为关闭，但贪睡确实会再响一次。
+        // 给出明确提示，避免用户误以为闹钟已彻底关闭（贪睡状态可见反馈）。
+        notifySnoozedUntil(item.snoozeMinutes)
         dismiss()
+    }
+
+    /** 提示「已贪睡，将于 HH:MM 再响」；界面按钮与通知按钮两个入口都会经过这里 */
+    private fun notifySnoozedUntil(minutes: Int) {
+        runCatching {
+            val until = System.currentTimeMillis() + minutes * 60_000L
+            val time = DateFormat.getTimeFormat(this).format(java.util.Date(until))
+            Toast.makeText(this, "已贪睡，将于 $time 再响", Toast.LENGTH_LONG).show()
+        }
     }
 
     // endregion
@@ -313,7 +330,10 @@ class AlarmRingService : Service() {
         private const val REQUEST_SNOOZE = 0x2002
         private const val REQUEST_STOP = 0x2003
         private const val WAKELOCK_TAG = "HeadphoneAlarm:ring"
-        private const val MAX_WAKELOCK_MS = 30 * 60 * 1000L
+        // 兜底超时须明显大于最大自动停止时长(30分)：唤醒锁从 onStartCommand 起计时，
+        // 而 autoStop 的 delay 从稍晚的读盘完成后起计，相等会在收尾前提前释锁。
+        // 正常路径由 dismiss() 主动释放，此处仅为防泄漏兜底。
+        private const val MAX_WAKELOCK_MS = 60 * 60 * 1000L
         private const val VOLUME_UI_STEP = 0.01f
 
         private val _state = MutableStateFlow<RingUiState?>(null)

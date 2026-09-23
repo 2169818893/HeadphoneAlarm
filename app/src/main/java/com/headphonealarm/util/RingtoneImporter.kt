@@ -44,10 +44,20 @@ object RingtoneImporter {
 
     fun toUriString(file: File): String = Uri.fromFile(file).toString()
 
-    fun delete(pathOrUri: String) {
+    /**
+     * 安全删除自定义铃声文件：仅当文件是本应用私有 ringtones 目录的**直接子文件**、
+     * 且不在 [referencedUris]（仍被闹钟引用）中时才删除，杜绝路径穿越与误删共享文件。
+     */
+    fun deleteOwnedRingtone(context: Context, pathOrUri: String?, referencedUris: Set<String>) {
+        if (pathOrUri.isNullOrBlank() || pathOrUri in referencedUris) return
         runCatching {
-            val file = if (pathOrUri.startsWith("file://")) File(Uri.parse(pathOrUri).path!!) else File(pathOrUri)
-            if (file.exists()) file.delete()
+            val path = if (pathOrUri.startsWith("file://")) Uri.parse(pathOrUri).path else pathOrUri
+            val file = File(path ?: return)
+            val ringtoneDir = File(context.filesDir, DIR_NAME).canonicalFile
+            // 只删私有铃声目录的直接子文件，防止 ../ 穿越误删其它数据
+            if (file.canonicalFile.parentFile == ringtoneDir && file.exists()) {
+                file.delete()
+            }
         }
     }
 }

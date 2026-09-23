@@ -187,7 +187,19 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             .setUsage(usage)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
             .build()
-        val player = runCatching { createPlayer(alarm, device, attributes) }
+        val primaryUri = resolveUri(alarm)
+        val player = runCatching { createPlayer(device, attributes, primaryUri) }
+            .recoverCatching { first ->
+                // 自定义铃声文件可能因备份恢复/换机/被系统清理而丢失：回退系统默认铃声，
+                // 确保闹钟「一定能响」而不是静默失败（丢失文件时 setDataSource/prepare 会抛异常）。
+                val fallback = defaultAlarmUri()
+                if (fallback.toString() != primaryUri.toString()) {
+                    Log.w(TAG, "铃声播放失败(${first.message})，回退系统默认铃声")
+                    createPlayer(device, attributes, fallback)
+                } else {
+                    throw first
+                }
+            }
             .getOrElse { error ->
                 emit(State.Failed(error.message ?: "音频文件无法播放"))
                 return
@@ -257,19 +269,25 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun createPlayer(
-        alarm: AlarmItem,
         device: AudioDeviceInfo?,
-        attributes: AudioAttributes
+        attributes: AudioAttributes,
+        uri: Uri
     ): MediaPlayer {
         val player = MediaPlayer()
-        player.setAudioAttributes(attributes)
-        player.isLooping = true
-        applyPreferredDevice(player, device)
-        player.setDataSource(context, resolveUri(alarm))
-        player.prepare()
-        // setDataSource / prepare 会重建底层音频通道，偏好必须重新声明一次
-        applyPreferredDevice(player, device)
-        return player
+        try {
+            player.setAudioAttributes(attributes)
+            player.isLooping = true
+            applyPreferredDevice(player, device)
+            player.setDataSource(context, uri)
+            player.prepare()
+            // setDataSource / prepare 会重建底层音频通道，偏好必须重新声明一次
+            applyPreferredDevice(player, device)
+            return player
+        } catch (t: Throwable) {
+            // 失败时释放半初始化的 MediaPlayer，避免回退重试时泄漏原生资源
+            runCatching { player.release() }
+            throw t
+        }
     }
 
     /**
@@ -283,12 +301,14 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         runCatching { player.setPreferredDevice(device) }
     }
 
-    private fun resolveUri(alarm: AlarmItem): Uri {
-        alarm.ringtoneUri?.takeIf { it.isNotBlank() }?.let { return Uri.parse(it) }
-        return RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+    private fun resolveUri(alarm: AlarmItem): Uri =
+        alarm.ringtoneUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: defaultAlarmUri()
+
+    /** 系统默认闹钟铃声，多级回退保证非空 */
+    private fun defaultAlarmUri(): Uri =
+        RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ?: Settings.System.DEFAULT_ALARM_ALERT_URI
-    }
 
     /**
      * 音量由小到大缓慢爬升，保护听力。

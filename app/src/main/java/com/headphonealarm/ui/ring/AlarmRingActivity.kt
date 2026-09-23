@@ -1,6 +1,5 @@
 package com.headphonealarm.ui.ring
 
-import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -127,9 +126,11 @@ class AlarmRingActivity : ComponentActivity() {
 
     private fun showOverLockScreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // setShowWhenLocked 已让本界面显示在锁屏之上并可交互（贪睡/关闭无需先解锁）。
+            // 不再调用 requestDismissKeyguard：设了 PIN/图案/指纹的设备上它会弹出解锁验证
+            // 界面盖住闹钟 UI，导致「锁屏看不到闹钟、必须先解锁」。
             setShowWhenLocked(true)
             setTurnScreenOn(true)
-            getSystemService(KeyguardManager::class.java)?.requestDismissKeyguard(this, null)
         } else {
             @Suppress("DEPRECATION")
             window.addFlags(

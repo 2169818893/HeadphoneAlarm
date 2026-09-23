@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <include domain="file" path="datastore" />
+    <!-- 自定义铃声复制在 filesDir/ringtones，必须一并备份，否则恢复后 ringtoneUri 指向丢失文件 -->
+    <include domain="file" path="ringtones" />
     <include domain="sharedpref" path="." />
     <exclude domain="sharedpref" path="androidx.work.util.preferences.xml" />
 </full-backup-content>

@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.TrendingUp
+import androidx.compose.material.icons.automirrored.outlined.VolumeMute
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -30,9 +32,7 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Snooze
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Timer
-import androidx.compose.material.icons.outlined.TrendingUp
 import androidx.compose.material.icons.outlined.Vibration
-import androidx.compose.material.icons.outlined.VolumeMute
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -90,7 +90,9 @@ import com.headphonealarm.ui.components.StatusPill
 import com.headphonealarm.ui.components.TimeWheel
 import com.headphonealarm.util.RingtoneImporter
 import com.headphonealarm.util.TimeUtils
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -334,7 +336,7 @@ fun AlarmEditScreen(
             item {
                 GlassCard {
                     SliderRow(
-                        icon = Icons.Outlined.TrendingUp,
+                        icon = Icons.AutoMirrored.Outlined.TrendingUp,
                         title = "音量渐强时长",
                         valueText = TimeUtils.rampDurationText(state.volumeRampSeconds),
                         value = state.volumeRampSeconds.toFloat(),
@@ -343,7 +345,7 @@ fun AlarmEditScreen(
                         onValueChange = { viewModel.setVolumeRamp(it.toInt()) }
                     )
                     SliderRow(
-                        icon = Icons.Outlined.VolumeMute,
+                        icon = Icons.AutoMirrored.Outlined.VolumeMute,
                         title = "起始音量",
                         valueText = "${state.rampStartPercent}%",
                         value = state.rampStartPercent.toFloat(),
@@ -642,6 +644,9 @@ class AlarmEditViewModel(
     private var previewPlayer: HeadphoneAlarmPlayer? = null
     private var previewJob: kotlinx.coroutines.Job? = null
 
+    /** 本次编辑会话导入的自定义铃声 URI；离开页面时清理其中未保存的，避免私有目录只增不减 */
+    private val sessionImportedUris = mutableListOf<String>()
+
     var previewingKey by mutableStateOf<String?>(null)
         private set
 
@@ -728,17 +733,29 @@ class AlarmEditViewModel(
             }
             result
                 .onSuccess { imported ->
+                    val newUri = RingtoneImporter.toUriString(imported.file)
+                    // 本次会话此前导入、已被这次替换的文件：清理掉，避免未保存就堆积
+                    val stale = sessionImportedUris.filterNot { it == newUri }
+                    sessionImportedUris.clear()
+                    sessionImportedUris.add(newUri)
                     update {
-                        it.copy(
-                            ringtoneUri = RingtoneImporter.toUriString(imported.file),
-                            ringtoneName = imported.displayName
-                        )
+                        it.copy(ringtoneUri = newUri, ringtoneName = imported.displayName)
                     }
                     _message.value = "已导入「${imported.displayName}」，点右侧 ▶ 试听"
+                    cleanupRingtones(stale)
                 }
                 .onFailure { error ->
                     _message.value = "导入失败：${error.message ?: "未知错误"}"
                 }
+        }
+    }
+
+    /** 删除不再被任何闹钟引用的自定义铃声文件（IO 线程执行，带引用检查防误删） */
+    private suspend fun cleanupRingtones(uris: List<String>) {
+        if (uris.isEmpty()) return
+        val referenced = repository.alarms.first().mapNotNull { it.ringtoneUri }.toSet()
+        withContext(Dispatchers.IO) {
+            uris.forEach { RingtoneImporter.deleteOwnedRingtone(getApplication(), it, referenced) }
         }
     }
 
@@ -809,8 +826,13 @@ class AlarmEditViewModel(
             // 保留原有启用状态：编辑页不展示开关，不应静默把用户已关闭的闹钟重新打开。
             // 新建闹钟时 enabled 默认为 true，仍然会直接启用。
             val item = _state.value.toAlarmItem(id, enabled = enabled)
+            val oldUri = if (alarmId > 0) repository.getById(alarmId)?.ringtoneUri else null
             repository.upsert(item)
             if (item.enabled) scheduler.schedule(item) else scheduler.cancel(item)
+            // 已保存的铃声进入被引用集合，移出待清理，避免离开页面时被误删
+            item.ringtoneUri?.let { sessionImportedUris.remove(it) }
+            // 更换过铃声：清理不再被任何闹钟引用的旧文件
+            if (oldUri != null && oldUri != item.ringtoneUri) cleanupRingtones(listOf(oldUri))
             _saved.value = true
         }
     }
@@ -821,6 +843,8 @@ class AlarmEditViewModel(
                 val existing = repository.getById(alarmId)
                 repository.remove(alarmId)
                 existing?.let { scheduler.cancel(it) }
+                // 清理该闹钟独占的自定义铃声文件（仍被其它闹钟引用时会自动跳过）
+                existing?.ringtoneUri?.let { cleanupRingtones(listOf(it)) }
             }
             _saved.value = true
         }
@@ -832,6 +856,18 @@ class AlarmEditViewModel(
 
     override fun onCleared() {
         stopPreview()
+        // 清理本次会话导入、但最终未保存的铃声文件，避免私有目录只增不减。
+        // viewModelScope 已随 onCleared 取消，用独立 scope 收尾；引用检查保证不会误删已保存的。
+        val orphans = sessionImportedUris.toList()
+        sessionImportedUris.clear()
+        if (orphans.isNotEmpty()) {
+            val repo = repository
+            val app = getApplication<Application>()
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                val referenced = repo.alarms.first().mapNotNull { it.ringtoneUri }.toSet()
+                orphans.forEach { RingtoneImporter.deleteOwnedRingtone(app, it, referenced) }
+            }
+        }
         super.onCleared()
     }
 
