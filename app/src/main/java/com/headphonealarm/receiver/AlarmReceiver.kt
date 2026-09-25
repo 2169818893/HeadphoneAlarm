@@ -12,14 +12,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 /**
- * 系统闹钟触发入口。只做两件事：更新重复状态 + 拉起响铃前台服务。
+ * 系统闹钟触发入口。立即拉起服务；服务读取并验证闹钟后负责更新重复状态。
  */
 class AlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_FIRE) return
+        if (intent.action != ACTION_FIRE && intent.action != ACTION_SNOOZE_FIRE) return
         val alarmId = intent.getLongExtra(EXTRA_ALARM_ID, -1L)
         if (alarmId <= 0L) return
 
@@ -35,29 +36,31 @@ class AlarmReceiver : BroadcastReceiver() {
         // 关键顺序：先「同步」拉起响铃服务与全屏界面，再做异步记账。
         // 小米/HyperOS 等 ROM 会在广播的异步阶段冻结进程，若把 startForegroundService
         // 放在 DataStore 读取之后，服务可能永远起不来——表现为「到点毫无反应」。
-        AlarmRingService.start(appContext, alarmId)
+        val isSnooze = intent.action == ACTION_SNOOZE_FIRE
+        val snoozeAt = intent.getLongExtra(EXTRA_SNOOZE_AT, 0L)
+        if (!AlarmRingService.start(appContext, alarmId, isSnooze, snoozeAt)) {
+            // Neither service-start API was accepted. The service cannot consume this fire,
+            // so record it here to disable a one-shot / reschedule a repeat / consume a
+            // snooze token. Keep the broadcast alive briefly for the DataStore write, but
+            // let the application-owned operation finish even if the receiver times out.
+            val pending = goAsync()
+            val accounting = AlarmApp.from(appContext).prepareQueuedFire(alarmId, isSnooze, snoozeAt)
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                try {
+                    withTimeout(ACCOUNTING_TIMEOUT_MS) { accounting.await() }
+                } catch (error: Exception) {
+                    Log.e(TAG, "响铃服务启动失败，触发记账未及时完成 id=$alarmId", error)
+                } finally {
+                    pending.finish()
+                }
+            }
+            // Without a service, an empty full-screen ring page would never finish loading.
+            return
+        }
         // 兜底：直接拉起全屏响铃界面。精确闹钟豁免「后台启动 Activity」限制，
         // 万一前台服务的 fullScreenIntent 被 ROM 拦截，界面仍有机会显示。
         AlarmRingActivity.launchFromAlarm(appContext, alarmId)
 
-        val app = AlarmApp.from(context)
-        val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            try {
-                val alarm = app.alarmRepository.getById(alarmId) ?: return@launch
-                if (alarm.repeatDays.isEmpty()) {
-                    // 一次性闹钟：响铃后自动关闭开关
-                    app.alarmRepository.setEnabled(alarm.id, false)
-                } else {
-                    // 重复闹钟：立即排下一次，避免用户长时间未关闭导致漏响
-                    app.alarmScheduler.schedule(alarm)
-                }
-            } catch (t: Throwable) {
-                Log.e(TAG, "闹钟记账失败 id=$alarmId", t)
-            } finally {
-                pendingResult.finish()
-            }
-        }
     }
 
     /**
@@ -77,9 +80,12 @@ class AlarmReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "AlarmReceiver"
         const val ACTION_FIRE = "com.headphonealarm.action.ALARM_FIRE"
+        const val ACTION_SNOOZE_FIRE = "com.headphonealarm.action.ALARM_SNOOZE_FIRE"
         const val EXTRA_ALARM_ID = "extra_alarm_id"
+        const val EXTRA_SNOOZE_AT = "extra_snooze_at"
         private const val BRIDGE_WAKELOCK_TAG = "HeadphoneAlarm:alarm-fire-bridge"
         // 桥接时长：足够冷启动读盘 + 启动播放器；服务接管后由服务自己的唤醒锁续期
         private const val BRIDGE_WAKELOCK_MS = 60 * 1000L
+        private const val ACCOUNTING_TIMEOUT_MS = 8_000L
     }
 }

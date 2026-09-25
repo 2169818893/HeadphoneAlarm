@@ -43,8 +43,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +65,7 @@ import com.headphonealarm.service.AlarmRingService
 import com.headphonealarm.ui.theme.AppTheme
 import com.headphonealarm.ui.theme.HeadphoneAlarmTheme
 import com.headphonealarm.ui.theme.LocalAppBackdrop
+import kotlinx.coroutines.delay
 
 /**
  * 响铃全屏界面。锁屏状态下直接展示，`singleInstance` 保证同一时间只有一个实例。
@@ -78,6 +82,21 @@ class AlarmRingActivity : ComponentActivity() {
             HeadphoneAlarmTheme(theme = AppTheme.fromKey(themeKey)) {
                 val ringState by AlarmRingService.state.collectAsStateWithLifecycle()
                 val backdrop = LocalAppBackdrop.current
+                var hasShownRing by remember { mutableStateOf(false) }
+                var startupTimedOut by remember { mutableStateOf(false) }
+                LaunchedEffect(ringState) {
+                    if (ringState != null) hasShownRing = true
+                    else if (hasShownRing) finish()
+                }
+                LaunchedEffect(ringState == null, hasShownRing) {
+                    startupTimedOut = false
+                    if (ringState == null && !hasShownRing) {
+                        // The system may accept a start request without ever starting the service.
+                        // Give the user a way out without automatically dismissing a late alarm.
+                        delay(30_000L)
+                        startupTimedOut = true
+                    }
+                }
 
                 // 闹钟结束后自动退出，避免留下空白页
                 if (ringState == null) {
@@ -93,9 +112,25 @@ class AlarmRingActivity : ComponentActivity() {
                 ) {
                     val current = ringState
                     if (current == null) {
-                        EmptyRingPlaceholder(onClose = { finish() })
+                        EmptyRingPlaceholder(
+                            message = when {
+                                hasShownRing -> "闹钟已结束"
+                                startupTimedOut -> "等待闹钟服务超时，请检查系统后台启动限制"
+                                else -> "正在准备闹钟…"
+                            },
+                            onClose = if (hasShownRing || startupTimedOut) ({ finish() }) else null
+                        )
+                    } else if (!current.actionsEnabled) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = current.statusText,
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     } else {
                         RingContent(
+                            alarmId = current.alarmId,
                             timeText = current.timeText,
                             label = current.label,
                             statusText = current.statusText,
@@ -105,12 +140,12 @@ class AlarmRingActivity : ComponentActivity() {
                             rampSeconds = current.rampSeconds,
                             maxVolumePercent = current.maxVolumePercent,
                             onSnooze = {
-                                AlarmRingService.snooze(this@AlarmRingActivity)
-                                finish()
+                                AlarmRingService.snooze(this@AlarmRingActivity, current.alarmId)
+                                // Only the service knows whether AlarmManager accepted the snooze.
+                                // On failure it keeps ringing and publishes a retryable error here.
                             },
                             onStop = {
-                                AlarmRingService.stop(this@AlarmRingActivity)
-                                finish()
+                                AlarmRingService.stop(this@AlarmRingActivity, current.alarmId)
                             }
                         )
                     }
@@ -165,6 +200,7 @@ class AlarmRingActivity : ComponentActivity() {
 
 @Composable
 private fun RingContent(
+    alarmId: Long,
     timeText: String,
     label: String,
     statusText: String,
@@ -311,7 +347,7 @@ private fun RingContent(
         Spacer(Modifier.height(28.dp))
 
         Text(
-            text = "声音仅在耳机中播放",
+            text = if (viaHeadphone) "声音仅在耳机中播放" else "请注意当前音频输出状态",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -320,7 +356,7 @@ private fun RingContent(
         Spacer(Modifier.height(2.dp))
         val ctx = LocalContext.current
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = { AlarmRingService.boost(ctx) }) {
+            TextButton(onClick = { AlarmRingService.boost(ctx, alarmId) }) {
                 Text(
                     "音量偏小？点按用最大",
                     style = MaterialTheme.typography.bodySmall,
@@ -402,7 +438,7 @@ private fun VolumeRampIndicator(
 }
 
 @Composable
-private fun EmptyRingPlaceholder(onClose: () -> Unit) {
+private fun EmptyRingPlaceholder(message: String, onClose: (() -> Unit)?) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -411,19 +447,21 @@ private fun EmptyRingPlaceholder(onClose: () -> Unit) {
         verticalArrangement = Arrangement.Center
     ) {
         Text(
-            text = "闹钟已结束",
+            text = message,
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurface
         )
-        Spacer(Modifier.height(16.dp))
-        Button(
-            onClick = onClose,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary
-            )
-        ) {
-            Text("关闭")
+        if (onClose != null) {
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onClose,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Text("关闭")
+            }
         }
     }
 }

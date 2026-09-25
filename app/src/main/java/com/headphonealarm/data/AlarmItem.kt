@@ -46,21 +46,49 @@ data class AlarmItem(
     val maxVolumePercent: Int = 85,
     val snoozeMinutes: Int = 5,
     /** 响铃最长持续时间（分钟），超时自动关闭 */
-    val autoStopMinutes: Int = 10
+    val autoStopMinutes: Int = 10,
+    /** 已安排的贪睡目标时间；与普通重复闹钟可以同时存在。 */
+    val snoozedUntil: Long? = null,
+    /** 区分触发后自动关闭的一次性闹钟与用户手动关闭的闹钟。 */
+    val consumedByFire: Boolean = false
 ) {
+
+    /** 原始贪睡时刻，也是广播的匹配令牌；过期太久的记录不再补响。 */
+    fun activeSnoozeTime(from: Long = System.currentTimeMillis()): Long? =
+        snoozedUntil?.takeIf {
+            (enabled || consumedByFire) && it > 0L && it >= from - SNOOZE_RECOVERY_GRACE_MS
+        }
+
+    /** 恢复过期不久的贪睡时，系统触发时间必须在未来，但令牌保持原始值。 */
+    fun snoozeTriggerTime(from: Long = System.currentTimeMillis()): Long? =
+        activeSnoozeTime(from)?.let { maxOf(it, from + 800L) }
+
+    /** 用于列表展示；一次性闹钟触发并关闭后，仍可能有待执行的贪睡。 */
+    fun nextScheduledTime(from: Long = System.currentTimeMillis()): Long? {
+        val regular = if (enabled) nextTriggerTime(from) else null
+        return listOfNotNull(regular, activeSnoozeTime(from)).minOrNull()
+    }
 
     /** 计算下一次触发时间戳（毫秒） */
     fun nextTriggerTime(from: Long = System.currentTimeMillis()): Long {
         val base = Calendar.getInstance().apply {
             timeInMillis = from
-            set(Calendar.HOUR_OF_DAY, hour)
-            set(Calendar.MINUTE, minute)
+            // 日期从中午推进，避免在夏令时缺失的时刻（如 02:30）上滚动日期，
+            // 导致原定 02:30 的次日闹钟永久变成 03:30。
+            set(Calendar.HOUR_OF_DAY, 12)
+            set(Calendar.MINUTE, 0)
             set(Calendar.SECOND, 0)
             set(Calendar.MILLISECOND, 0)
         }
 
         if (repeatDays.isEmpty()) {
-            if (base.timeInMillis <= from) base.add(Calendar.DAY_OF_YEAR, 1)
+            val today = base.clone() as Calendar
+            today.set(Calendar.HOUR_OF_DAY, hour)
+            today.set(Calendar.MINUTE, minute)
+            if (today.timeInMillis > from) return today.timeInMillis
+            base.add(Calendar.DAY_OF_YEAR, 1)
+            base.set(Calendar.HOUR_OF_DAY, hour)
+            base.set(Calendar.MINUTE, minute)
             return base.timeInMillis
         }
 
@@ -69,10 +97,16 @@ data class AlarmItem(
             val candidate = base.clone() as Calendar
             candidate.add(Calendar.DAY_OF_YEAR, offset)
             val isoDay = candidate.get(Calendar.DAY_OF_WEEK).toIsoDay()
+            candidate.set(Calendar.HOUR_OF_DAY, hour)
+            candidate.set(Calendar.MINUTE, minute)
             if (isoDay in repeatDays && candidate.timeInMillis > from) {
                 return candidate.timeInMillis
             }
         }
+        // 损坏数据中没有合法星期时，仍返回未来的安全退路。
+        base.add(Calendar.DAY_OF_YEAR, 1)
+        base.set(Calendar.HOUR_OF_DAY, hour)
+        base.set(Calendar.MINUTE, minute)
         return base.timeInMillis
     }
 
@@ -82,6 +116,8 @@ data class AlarmItem(
     fun timeText(): String = "%02d:%02d".format(hour, minute)
 
     companion object {
+        /** 重启后只补响短时间内错过的贪睡，避免数日后突然响起旧闹钟。 */
+        const val SNOOZE_RECOVERY_GRACE_MS = 10 * 60_000L
         val DAY_SHORT = arrayOf("一", "二", "三", "四", "五", "六", "日")
         val DAY_LABEL = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
     }
@@ -91,10 +127,14 @@ data class AlarmItem(
 fun Int.toIsoDay(): Int = if (this == Calendar.SUNDAY) 7 else this - 1
 
 /** 把重复星期集合转成可读文本 */
-fun repeatTextOf(days: Set<Int>): String = when {
-    days.isEmpty() -> "仅一次"
-    days.size == 7 -> "每天"
-    days == setOf(1, 2, 3, 4, 5) -> "工作日"
-    days == setOf(6, 7) -> "周末"
-    else -> days.sorted().joinToString(" ") { AlarmItem.DAY_SHORT[it - 1] }
+fun repeatTextOf(days: Set<Int>): String {
+    val validDays = days.filterTo(mutableSetOf()) { it in 1..7 }
+    return when {
+        days.isEmpty() -> "仅一次"
+        validDays.isEmpty() -> "重复日期异常"
+        validDays.size == 7 -> "每天"
+        validDays == setOf(1, 2, 3, 4, 5) -> "工作日"
+        validDays == setOf(6, 7) -> "周末"
+        else -> validDays.sorted().joinToString(" ") { AlarmItem.DAY_SHORT[it - 1] }
+    }
 }

@@ -4,11 +4,9 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
@@ -28,7 +26,6 @@ class AlarmRepository(private val context: Context) {
 
     /** 全量闹钟列表（按时间排序） */
     val alarms: Flow<List<AlarmItem>> = context.alarmDataStore.data
-        .catch { emit(emptyPreferences()) }
         .map { prefs -> decode(prefs[KEY_ALARMS]) }
 
     suspend fun getById(id: Long): AlarmItem? =
@@ -45,6 +42,10 @@ class AlarmRepository(private val context: Context) {
         list.map { if (it.id == id) it.copy(enabled = enabled) else it }
     }
 
+    suspend fun setSnoozedUntil(id: Long, until: Long?) = mutate { list ->
+        list.map { if (it.id == id) it.copy(snoozedUntil = until) else it }
+    }
+
     private suspend fun mutate(block: (List<AlarmItem>) -> List<AlarmItem>) {
         context.alarmDataStore.edit { prefs ->
             val current = decode(prefs[KEY_ALARMS])
@@ -53,10 +54,10 @@ class AlarmRepository(private val context: Context) {
     }
 
     private fun decode(raw: String?): List<AlarmItem> {
-        if (raw.isNullOrBlank()) return emptyList()
-        return runCatching { json.decodeFromString<List<AlarmItem>>(raw) }
-            .getOrDefault(emptyList())
-            .sortedForDisplay()
+        if (raw == null) return emptyList()
+        // A corrupt/non-list value is NOT an empty alarm store. Failing the read also prevents
+        // edit() from replacing the original bytes with a new list on the next mutation.
+        return json.decodeFromString<List<AlarmItem>>(raw).sortedForDisplay()
     }
 
     private fun List<AlarmItem>.sortedForDisplay(): List<AlarmItem> =

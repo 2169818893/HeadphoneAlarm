@@ -84,11 +84,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.util.Calendar
 
@@ -99,8 +105,10 @@ fun AlarmListScreen(
     viewModel: AlarmListViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    val alarms by viewModel.alarms.collectAsStateWithLifecycle()
+    val alarmState by viewModel.alarmState.collectAsStateWithLifecycle()
+    val alarms = (alarmState as? AlarmLoadState.Ready)?.alarms.orEmpty()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val failedScheduleIds by viewModel.failedScheduleIds.collectAsStateWithLifecycle()
     val theme by viewModel.theme.collectAsStateWithLifecycle()
     val now = rememberTickingNow()
     val headphone = rememberHeadphoneConnected()
@@ -140,19 +148,22 @@ fun AlarmListScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val enabledAlarms = alarms.filter { it.enabled }
-    val nextTrigger = remember(enabledAlarms) { enabledAlarms.minOfOrNull { it.nextTriggerTime() } }
+    val loaded = alarmState is AlarmLoadState.Ready
+    val scheduledAlarms = alarms.filter { it.nextScheduledTime(now) != null }
+    val nextTrigger = scheduledAlarms.mapNotNull { it.nextScheduledTime(now) }.minOrNull()
 
     Scaffold(
         containerColor = Color.Transparent,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onAddAlarm,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                icon = { Icon(Icons.Outlined.Add, contentDescription = null) },
-                text = { Text("新建闹钟", fontWeight = FontWeight.SemiBold) }
-            )
+            if (loaded) {
+                ExtendedFloatingActionButton(
+                    onClick = onAddAlarm,
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    icon = { Icon(Icons.Outlined.Add, contentDescription = null) },
+                    text = { Text("新建闹钟", fontWeight = FontWeight.SemiBold) }
+                )
+            }
         }
     ) { scaffoldPadding ->
         LazyColumn(
@@ -169,12 +180,19 @@ fun AlarmListScreen(
         ) {
             item { Header(headphone, deviceSummary) }
 
-            item {
-                NextAlarmCard(
-                    nextTrigger = nextTrigger,
-                    now = now,
-                    alarmCount = enabledAlarms.size
-                )
+            when (val current = alarmState) {
+                is AlarmLoadState.Ready -> item {
+                    NextAlarmCard(nextTrigger, now, scheduledAlarms.size)
+                }
+                AlarmLoadState.Loading -> item {
+                    GlassCard { Text("正在读取闹钟…") }
+                }
+                is AlarmLoadState.Error -> item {
+                    GlassCard {
+                        Text(current.message, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = viewModel::retryLoading) { Text("重试读取") }
+                    }
+                }
             }
 
             if (!exactAlarmGranted || !notificationGranted || !fullScreenGranted || batteryOptimized) {
@@ -225,6 +243,18 @@ fun AlarmListScreen(
             message?.let { text ->
                 item { MessageBanner(text) }
             }
+            if (loaded && failedScheduleIds.isNotEmpty()) {
+                item {
+                    GlassCard {
+                        Text(
+                            "有 ${failedScheduleIds.size} 项闹钟未能在系统中注册或取消，可能不响或误响。请检查权限后重试。",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        TextButton(onClick = viewModel::rescheduleAll) { Text("重新排程") }
+                    }
+                }
+            }
 
             if (alarms.isNotEmpty()) {
                 item { SectionTitle("我的闹钟（${alarms.size}）") }
@@ -238,22 +268,25 @@ fun AlarmListScreen(
                     onClick = { onEditAlarm(alarm.id) },
                     onPreview = { viewModel.preview(alarm) },
                     onStopPreview = { viewModel.stopPreview() },
-                    isPreviewing = viewModel.previewingId == alarm.id
+                    isPreviewing = viewModel.previewingId == alarm.id,
+                    onCancelSnooze = { until -> viewModel.cancelSnooze(alarm.id, until) }
                 )
             }
 
-            if (alarms.isEmpty()) {
+            if (loaded && alarms.isEmpty()) {
                 item { EmptyState() }
             }
 
             item { Spacer(Modifier.height(8.dp)) }
             item { SectionTitle("外观主题") }
             item { ThemePickerCard(current = theme, onSelect = viewModel::selectTheme) }
-            item {
-                FooterHint(
-                    onTestLockScreen = { viewModel.scheduleLockScreenTest() },
-                    exactAlarmGranted = exactAlarmGranted
-                )
+            if (loaded) {
+                item {
+                    FooterHint(
+                        onTestLockScreen = { viewModel.scheduleLockScreenTest() },
+                        exactAlarmGranted = exactAlarmGranted
+                    )
+                }
             }
 
             item { VolumeSafetyNotice() }
@@ -281,7 +314,7 @@ private fun Header(headphoneConnected: Boolean, deviceSummary: String) {
                 icon = Icons.Outlined.Headphones
             )
             Text(
-                text = "响铃只走耳机，不外放",
+                text = "默认耳机播放；每条闹钟可单独设置外放策略",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -312,7 +345,7 @@ private fun NextAlarmCard(nextTrigger: Long?, now: Long, alarmCount: Int) {
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (nextTrigger == null) "没有启用的闹钟" else "下一次响铃",
+                    text = if (nextTrigger == null) "没有待响的闹钟" else "下一次响铃",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -332,7 +365,7 @@ private fun NextAlarmCard(nextTrigger: Long?, now: Long, alarmCount: Int) {
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        text = "${TimeUtils.countdownText(nextTrigger, now)} · 共 $alarmCount 个启用",
+                        text = "${TimeUtils.countdownText(nextTrigger, now)} · 共 $alarmCount 个待响",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -350,9 +383,13 @@ private fun AlarmCard(
     onClick: () -> Unit,
     onPreview: () -> Unit,
     onStopPreview: () -> Unit,
-    isPreviewing: Boolean
+    isPreviewing: Boolean,
+    onCancelSnooze: (Long) -> Unit
 ) {
-    GlassCard(onClick = onClick, modifier = Modifier.alpha(if (alarm.enabled) 1f else 0.55f)) {
+    val mayUseSpeaker = !alarm.headphoneOnly || alarm.noHeadphoneAction == NoHeadphoneAction.SPEAKER
+    val snoozeUntil = alarm.activeSnoozeTime(now)
+    val nextTrigger = alarm.nextScheduledTime(now)
+    GlassCard(onClick = onClick, modifier = Modifier.alpha(if (nextTrigger != null) 1f else 0.55f)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -360,7 +397,7 @@ private fun AlarmCard(
                     fontSize = 40.sp,
                     lineHeight = 46.sp,
                     fontWeight = FontWeight.Light,
-                    color = if (alarm.enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (nextTrigger != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(4.dp))
                 Row(
@@ -380,20 +417,32 @@ private fun AlarmCard(
                         )
                     }
                 }
-                if (alarm.enabled) {
+                if (nextTrigger != null) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "下次 ${TimeUtils.countdownText(alarm.nextTriggerTime(now), now)}",
+                        text = (if (nextTrigger == snoozeUntil) "贪睡中 · " else "下次 ") +
+                            TimeUtils.countdownText(nextTrigger, now),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
                     )
                 }
+                if (snoozeUntil != null) {
+                    Text(
+                        text = "贪睡 ${TimeUtils.describe(snoozeUntil, now)}" +
+                            if (alarm.enabled) " · 与重复闹钟分别排程" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    TextButton(onClick = { onCancelSnooze(snoozeUntil) }) {
+                        Text("取消本次贪睡（不影响重复闹钟）")
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     StatusPill(
-                        text = if (alarm.headphoneOnly) "仅耳机" else "允许外放",
-                        active = alarm.headphoneOnly,
-                        icon = if (alarm.headphoneOnly) Icons.Outlined.Headphones else Icons.Outlined.Speaker
+                        text = if (mayUseSpeaker) "允许外放" else "仅耳机",
+                        active = !mayUseSpeaker,
+                        icon = if (mayUseSpeaker) Icons.Outlined.Speaker else Icons.Outlined.Headphones
                     )
                     if (alarm.vibrate) {
                         StatusPill(text = "震动", active = false, icon = Icons.Outlined.NotificationsActive)
@@ -535,7 +584,7 @@ private fun EmptyState() {
             Column {
                 Text("还没有闹钟", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
                 Text(
-                    "点击右下角新建，声音会只从耳机播放",
+                    "点击右下角新建；默认只从耳机播放，可逐条调整策略",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -574,7 +623,7 @@ private fun FooterHint(onTestLockScreen: () -> Unit, exactAlarmGranted: Boolean)
             Icon(Icons.Outlined.Bedtime, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
             Spacer(Modifier.width(12.dp))
             Text(
-                text = "睡前插好耳机再开始休息。若响铃时耳机未连接，应用会保持静默并等待耳机接入，绝不会从扬声器出声。",
+                text = "睡前检查耳机连接与每条闹钟的播放策略。默认无耳机时等待接入；若选择「允许外放」，响铃可能通过扬声器播放。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -750,11 +799,17 @@ private fun rememberAudioOutputSummary(): String {
 /** 试听时长，与铃声编辑页保持一致 */
 private const val PREVIEW_DURATION_MS = 6_000L
 
+sealed interface AlarmLoadState {
+    data object Loading : AlarmLoadState
+    data class Ready(val alarms: List<AlarmItem>) : AlarmLoadState
+    data class Error(val message: String) : AlarmLoadState
+}
+
 class AlarmListViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = AlarmApp.from(application)
     private val repository = app.alarmRepository
-    private val scheduler = app.alarmScheduler
+    private val operations = app.alarmOperations
     private val settings = app.settingsRepository
 
     /** 当前界面主题，供选择器高亮；改后 DataStore 驱动全局重组 */
@@ -767,6 +822,7 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private var previewPlayer: HeadphoneAlarmPlayer? = null
+    private var previewJob: Job? = null
     var previewingId by mutableLongStateOf(-1L)
         private set
 
@@ -774,24 +830,69 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
-    val alarms: StateFlow<List<AlarmItem>> = repository.alarms.stateIn(
+    private val reload = MutableStateFlow(0)
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val alarmState: StateFlow<AlarmLoadState> = reload.flatMapLatest {
+        repository.alarms
+            .map<List<AlarmItem>, AlarmLoadState> { AlarmLoadState.Ready(it) }
+            .catch { error ->
+                if (error is CancellationException) throw error
+                emit(AlarmLoadState.Error("闹钟读取失败，未修改数据：" + (error.message ?: "未知错误")))
+            }
+            .onStart { emit(AlarmLoadState.Loading) }
+    }.stateIn(
         viewModelScope,
-        SharingStarted.WhileSubscribed(5_000),
-        emptyList()
+        SharingStarted.Eagerly,
+        AlarmLoadState.Loading
     )
+    val failedScheduleIds: StateFlow<Set<Long>> = operations.failedScheduleIds
+
+    fun retryLoading() {
+        reload.value++
+        // ON_RESUME may already have observed the previous Error and skipped scheduling.
+        // Wait for a fresh, successful read before rebuilding OS alarms; never treat a
+        // failed read as an empty alarm list.
+        viewModelScope.launch {
+            try {
+                repository.alarms.first()
+                operations.rescheduleAll()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _message.value = "读取或重新排程失败：" + (error.message ?: "未知错误")
+            }
+        }
+    }
 
     fun setEnabled(alarm: AlarmItem, enabled: Boolean) {
         viewModelScope.launch {
-            repository.setEnabled(alarm.id, enabled)
-            val updated = alarm.copy(enabled = enabled)
-            if (enabled) scheduler.schedule(updated) else scheduler.cancel(updated)
+            try {
+                operations.setEnabled(alarm.id, enabled)
+            } catch (error: Exception) {
+                _message.value = "修改闹钟失败：${error.message ?: "未知错误"}"
+            }
+        }
+    }
+
+    fun cancelSnooze(id: Long, until: Long) {
+        viewModelScope.launch {
+            try {
+                operations.cancelSnooze(id, until)
+            } catch (error: Exception) {
+                _message.value = "取消贪睡失败：${error.message ?: "未知错误"}"
+            }
         }
     }
 
     fun rescheduleAll() {
         viewModelScope.launch {
-            if (AlarmPermissions.canScheduleExactAlarms(getApplication())) {
-                scheduler.rescheduleAll(repository)
+            try {
+                // ON_RESUME may precede the first DataStore emission; corrupt data must not
+                // be mistaken for an empty store or silently passed to the scheduler.
+                if (alarmState.first { it !is AlarmLoadState.Loading } !is AlarmLoadState.Ready) return@launch
+                operations.rescheduleAll()
+            } catch (error: Exception) {
+                _message.value = "重新排程失败：${error.message ?: "未知错误"}"
             }
         }
     }
@@ -805,7 +906,7 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
         _message.value = null
 
         // 先布置收尾任务：播放失败的回调是同步触发的
-        viewModelScope.launch {
+        previewJob = viewModelScope.launch {
             delay(PREVIEW_DURATION_MS)
             if (previewingId == alarm.id) stopPreview()
         }
@@ -814,8 +915,8 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
             alarm = alarm.copy(
                 enabled = true,
                 vibrate = false,
-                // 试听与真实响铃一致：只走耳机、无耳机时静默等待并提示，绝不外放。
-                // 闹钟本身若设了「允许外放」，试听也仍然只在耳机中出声。
+                // 出于安全考虑，试听固定只走耳机；闹钟若设了「允许外放」，
+                // 正式响铃会遵从外放配置，但试听仍保持静音等待耳机。
                 headphoneOnly = true,
                 noHeadphoneAction = NoHeadphoneAction.WAIT,
                 // 试听同样演示渐强效果，压缩到 5 秒以便在 6 秒内听完
@@ -843,20 +944,23 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
      * （AlarmManager → 广播 → 前台服务 → 全屏通知），用户锁屏即可验证。
      */
     fun scheduleLockScreenTest() {
+        if (alarmState.value !is AlarmLoadState.Ready) {
+            _message.value = "请先成功读取闹钟，再创建锁屏测试"
+            return
+        }
         if (!AlarmPermissions.canScheduleExactAlarms(getApplication())) {
             _message.value = "请先开启「精确闹钟」权限，否则无法安排测试"
             return
         }
         viewModelScope.launch {
+            val stored = alarmState.value as? AlarmLoadState.Ready ?: return@launch
             val target = Calendar.getInstance().apply {
-                add(Calendar.MINUTE, 1)
-                set(Calendar.SECOND, 0)
-                set(Calendar.MILLISECOND, 0)
+                timeInMillis = TimeUtils.nextWholeMinuteAfter(System.currentTimeMillis(), 60_000L)
             }
             // 沿用已有闹钟的耳机策略，保证测的就是真实行为
-            val template = alarms.value.firstOrNull { it.enabled }
+            val template = stored.alarms.firstOrNull { it.enabled }
             val item = (template ?: AlarmItem(id = 0L, hour = 0, minute = 0)).copy(
-                id = System.currentTimeMillis(),
+                id = 0L,
                 hour = target.get(Calendar.HOUR_OF_DAY),
                 minute = target.get(Calendar.MINUTE),
                 label = "锁屏测试",
@@ -864,13 +968,22 @@ class AlarmListViewModel(application: Application) : AndroidViewModel(applicatio
                 repeatDays = emptySet(),
                 autoStopMinutes = 2
             )
-            repository.upsert(item)
-            scheduler.schedule(item)
-            _message.value = "已安排 ${item.timeText()} 响铃（已加入列表），请立刻锁屏等待"
+            try {
+                val id = operations.create(item)
+                _message.value = if (id in operations.failedScheduleIds.value) {
+                    "测试闹钟已保存，但系统排程失败；请检查权限，不要等待响铃"
+                } else {
+                    "已安排 ${item.timeText()} 响铃（已加入列表），请立刻锁屏等待"
+                }
+            } catch (error: Exception) {
+                _message.value = "创建测试闹钟失败：${error.message ?: "未知错误"}"
+            }
         }
     }
 
     fun stopPreview() {
+        previewJob?.cancel()
+        previewJob = null
         previewPlayer?.release()
         previewPlayer = null
         previewingId = -1L

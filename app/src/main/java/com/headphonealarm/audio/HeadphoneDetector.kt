@@ -9,7 +9,7 @@ import android.os.Handler
 import android.os.Looper
 
 /**
- * 耳机（含蓝牙 / USB / Type-C）识别工具。
+ * 耳机（含蓝牙及明确报告为耳机的 USB / Type-C 设备）识别工具。
  *
  * 通过 [AudioManager.getDevices] 枚举当前所有**输出**设备并判断类型，
  * 不使用已废弃的 `isWiredHeadsetOn`（在部分机型上恒为 false）。
@@ -28,9 +28,8 @@ class HeadphoneDetector(context: Context) {
         add(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         add(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
         add(AudioDeviceInfo.TYPE_USB_HEADSET)
-        // 不带麦克风的 Type-C 耳机会报成 TYPE_USB_DEVICE（而非 TYPE_USB_HEADSET），
-        // 不补上会被当作「没插耳机」而静默。
-        add(AudioDeviceInfo.TYPE_USB_DEVICE)
+        // TYPE_USB_DEVICE 也可能是 USB 音箱或 DAC，无法仅凭该类型确认是耳机。
+        // 为避免将外放设备误当耳机，未知 USB 输出必须保持静音。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             add(AudioDeviceInfo.TYPE_HEARING_AID)
         }
@@ -41,6 +40,16 @@ class HeadphoneDetector(context: Context) {
 
     fun isHeadphone(device: AudioDeviceInfo?): Boolean =
         device != null && device.isSink && device.type in headphoneTypes
+
+    /** 拔出后路由查询可能短暂返回旧设备；只认可当前仍在输出列表中的耳机。 */
+    fun isConnectedHeadphone(device: AudioDeviceInfo?): Boolean {
+        if (!isHeadphone(device)) return false
+        val id = device?.id ?: return false
+        return runCatching {
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { it.id == id && isHeadphone(it) }
+        }.getOrDefault(false)
+    }
 
     /**
      * 查找一个最适合作为闹钟输出的耳机设备。
@@ -58,7 +67,6 @@ class HeadphoneDetector(context: Context) {
             AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
             AudioDeviceInfo.TYPE_WIRED_HEADSET,
             AudioDeviceInfo.TYPE_USB_HEADSET,
-            AudioDeviceInfo.TYPE_USB_DEVICE,
             AudioDeviceInfo.TYPE_HEARING_AID,
             AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
             AudioDeviceInfo.TYPE_BLUETOOTH_SCO,

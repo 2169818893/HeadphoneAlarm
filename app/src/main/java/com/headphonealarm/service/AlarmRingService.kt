@@ -6,6 +6,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -20,7 +21,9 @@ import com.headphonealarm.R
 import com.headphonealarm.audio.HeadphoneAlarmPlayer
 import com.headphonealarm.data.AlarmItem
 import com.headphonealarm.ui.ring.AlarmRingActivity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -30,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.ArrayDeque
 
 /**
  * 响铃前台服务：承载音频播放、通知与自动超时。
@@ -49,7 +53,9 @@ class AlarmRingService : Service() {
         val volumeProgress: Float = 1f,
         /** 渐强总时长（秒），0 表示未开启 */
         val rampSeconds: Int = 0,
-        val maxVolumePercent: Int = 100
+        val maxVolumePercent: Int = 100,
+        /** 尚未验证这条触发时，界面不能操作上一条闹钟。 */
+        val actionsEnabled: Boolean = true
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -57,8 +63,19 @@ class AlarmRingService : Service() {
     private lateinit var player: HeadphoneAlarmPlayer
 
     private var alarm: AlarmItem? = null
+    private var loadingAlarmId: Long? = null
+    private data class FireRequest(val id: Long, val isSnooze: Boolean, val snoozeAt: Long)
+    private data class QueuedFire(val request: FireRequest, val prepared: Deferred<AlarmItem?>)
+    private val queuedFires = ArrayDeque<QueuedFire>()
+    private var currentFire: FireRequest? = null
+    /** 触发记账独立于 Service 生命周期；同 ID 的后续触发必须等待它完成。 */
+    private var currentPrepared: Deferred<AlarmItem?>? = null
+    private var startJob: Job? = null
+    private class SnoozeRequest(val alarmId: Long, var cancelled: Boolean = false)
+    private var pendingSnooze: SnoozeRequest? = null
     private var autoStopJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastStartId: Int = 0
 
     /** 渐强进度只驱动界面，不重建通知，避免每秒几十次通知刷新 */
     private var volumeProgress: Float = 1f
@@ -70,26 +87,59 @@ class AlarmRingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         Log.i(TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
-            ACTION_STOP -> dismiss()
-            ACTION_SNOOZE -> snooze()
-            ACTION_BOOST -> player.boostToMaxVolume()
+            ACTION_STOP -> if (matchesCurrentAlarm(intent)) {
+                dismiss()
+            } else stopIfIdle(startId)
+            ACTION_SNOOZE -> if (matchesCurrentAlarm(intent)) snooze() else stopIfIdle(startId)
+            ACTION_BOOST -> if (matchesCurrentAlarm(intent)) player.boostToMaxVolume() else stopIfIdle(startId)
             ACTION_START -> {
                 val id = intent.getLongExtra(EXTRA_ALARM_ID, -1L)
-                if (id < 0) {
-                    stopSelf()
+                val request = FireRequest(
+                    id, intent.getBooleanExtra(EXTRA_SNOOZE, false),
+                    intent.getLongExtra(EXTRA_SNOOZE_AT, 0L)
+                )
+                if (id <= 0) {
+                    stopIfIdle(startId)
+                } else if (alarm?.id == id) {
+                    // 同 ID 的新普通触发也要记账：用户可能在响铃过程中修改了
+                    // 重复闹钟，新的触发不应因播放器正在响而丢失下次排程。
+                    // 不重复消费一次性闹钟，也不重启播放器/计时。
+                    if (request.isSnooze) {
+                        if (request != currentFire) app.consumeRedundantSnooze(id, request.snoozeAt)
+                    } else {
+                        app.recordAlarmFireById(id)
+                    }
+                } else if (loadingAlarmId == id && startJob?.isActive == true) {
+                    // Loading 中的第二次触发不能抢在原请求读盘前关闭一次性闹钟。
+                    if (request != currentFire) {
+                        currentPrepared?.invokeOnCompletion {
+                            if (request.isSnooze) app.consumeRedundantSnooze(id, request.snoozeAt)
+                            else app.recordAlarmFireById(id)
+                        }
+                    }
                 } else {
-                    // 同步持锁：必须在进入任何协程/异步读盘之前就握住 CPU，否则息屏后
-                    // CPU 可能在读取闹钟数据、启动播放器之前挂起，造成「后台不响、切回前台才响」。
-                    acquireWakeLock()
-                    // 系统要求 startForegroundService 后 5 秒内进入前台，
-                    // 先用占位通知抢占，再异步读取闹钟数据，避免超时崩溃
-                    startForegroundPlaceholder()
-                    startRinging(id)
+                    val queued = queuedFires.firstOrNull { it.request.id == id }
+                    if (queued != null) {
+                        // 先前的排队读盘与触发记账必须完成，再处理同 ID 的第二次触发。
+                        // 否则第二次记账可能先关闭一次性闹钟，导致第一次不响。
+                        if (request != queued.request) {
+                            queued.prepared.invokeOnCompletion {
+                                if (request.isSnooze) app.consumeRedundantSnooze(id, request.snoozeAt)
+                                else app.recordAlarmFireById(id)
+                            }
+                        }
+                    } else if (currentFire != null) {
+                        // 不截断正在响的闹钟。提前完成下一次排程/贪睡消费，按触发顺序响铃。
+                        queuedFires.addLast(QueuedFire(request, app.prepareQueuedFire(id, request.isSnooze, request.snoozeAt)))
+                    } else {
+                        beginRinging(request)
+                    }
                 }
             }
-            else -> Unit
+            else -> stopIfIdle(startId)
         }
         return START_NOT_STICKY
     }
@@ -97,7 +147,12 @@ class AlarmRingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        // System destruction is not an explicit dismissal; the app-owned snooze must complete.
+        pendingSnooze = null
+        startJob?.cancel()
+        currentPrepared = null
         autoStopJob?.cancel()
+        queuedFires.clear()
         player.release()
         releaseWakeLock()
         _state.value = null
@@ -122,32 +177,95 @@ class AlarmRingService : Service() {
 
     // region 响铃流程
 
-    private fun startRinging(alarmId: Long) {
-        scope.launch {
-            val item = app.alarmRepository.getById(alarmId)
-            if (item == null) {
-                Log.w(TAG, "找不到闹钟 id=$alarmId，服务退出")
-                stopSelf()
-                return@launch
-            }
-            Log.i(
-                TAG,
-                "开始响铃 id=$alarmId headphoneOnly=${item.headphoneOnly} " +
-                    "noHeadphoneAction=${item.noHeadphoneAction} ringtone=${item.ringtoneUri}"
-            )
-            alarm = item
-            volumeProgress = 1f
-            lastNotifiedVolume = -1f
-            acquireWakeLock()
-            publish(item, "准备播放…", viaHeadphone = false, foreground = true)
-
-            player.start(
-                alarm = item,
-                onState = { state -> handlePlayerState(item, state) },
-                onVolume = { progress -> handleVolumeProgress(progress) }
-            )
-            scheduleAutoStop(item)
+    private fun beginRinging(request: FireRequest, prepared: Deferred<AlarmItem?>? = null) {
+        currentFire = request
+        loadingAlarmId = request.id
+        // 读盘/触发记账由应用持有，即使服务在加载途中销毁也须完成下次排程。
+        val fire = prepared ?: app.prepareQueuedFire(request.id, request.isSnooze, request.snoozeAt)
+        currentPrepared = fire
+        _state.value = RingUiState(
+            alarmId = request.id,
+            timeText = "",
+            label = "",
+            statusText = "正在准备闹钟…",
+            viaHeadphone = false,
+            snoozeMinutes = 0,
+            actionsEnabled = false
+        )
+        // 同步持锁并先进入前台；不能等待协程读盘，否则息屏时可能挂起或超 5 秒。
+        acquireWakeLock()
+        val foregroundStarted = runCatching { startForegroundPlaceholder(request.id) }
+            .onFailure { Log.e(TAG, "无法启动响铃前台服务 id=${request.id}，停止播放", it) }
+            .isSuccess
+        if (!foregroundStarted) {
+            // Deferred 属于 Application：已触发及排队闹钟仍会完成记账，
+            // 但通知不可用时不能继续读盘、播放或尝试逐个启动排队闹钟。
+            dismiss(continueQueue = false)
+            return
         }
+        startRinging(request, fire)
+    }
+
+    private fun startRinging(request: FireRequest, prepared: Deferred<AlarmItem?>) {
+        val alarmId = request.id
+        startJob = scope.launch {
+            try {
+                val fired = prepared.await()
+                // 编辑、手动禁用或删除应取消尚未开始的响铃；一次性闹钟
+                // 触发后的自动禁用及另一个触发消费贪睡令牌不应取消它。
+                val item = fired?.takeIf { snapshot ->
+                    val current = app.alarmRepository.getById(alarmId)
+                    current != null && (current.enabled || current.consumedByFire) &&
+                        current.copy(
+                            enabled = snapshot.enabled,
+                            consumedByFire = snapshot.consumedByFire,
+                            snoozedUntil = snapshot.snoozedUntil
+                        ) == snapshot
+                }
+                if (item == null) {
+                    Log.w(TAG, "闹钟不存在、已禁用或贪睡已取消 id=$alarmId，服务退出")
+                    if (loadingAlarmId == alarmId) dismiss()
+                    return@launch
+                }
+                loadingAlarmId = null
+                currentPrepared = null
+                Log.i(
+                    TAG,
+                    "开始响铃 id=$alarmId headphoneOnly=${item.headphoneOnly} " +
+                        "noHeadphoneAction=${item.noHeadphoneAction} ringtone=${item.ringtoneUri}"
+                )
+                alarm = item
+                volumeProgress = 1f
+                lastNotifiedVolume = -1f
+                acquireWakeLock()
+                publish(item, "准备播放…", viaHeadphone = false, foreground = true)
+
+                player.start(
+                    alarm = item,
+                    onState = { state -> handlePlayerState(item, state) },
+                    onVolume = { progress -> handleVolumeProgress(progress) }
+                )
+                scheduleAutoStop(item)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Log.e(TAG, "闹钟启动/记账失败 id=$alarmId", error)
+                if (alarm?.id == alarmId || loadingAlarmId == alarmId) {
+                    // 更新前台通知失败时不能让下一条排队闹钟在无前台保障下播放。
+                    dismiss(continueQueue = false)
+                }
+            }
+        }
+    }
+
+    private fun matchesCurrentAlarm(intent: Intent): Boolean {
+        val id = intent.getLongExtra(EXTRA_ALARM_ID, -1L)
+        return id > 0 && (id == alarm?.id || id == loadingAlarmId)
+    }
+
+    /** 过期通知的操作不应重新启动一个永远不退出的空服务。 */
+    private fun stopIfIdle(startId: Int) {
+        if (alarm == null && loadingAlarmId == null && queuedFires.isEmpty()) stopSelfResult(startId)
     }
 
     private fun handlePlayerState(item: AlarmItem, state: HeadphoneAlarmPlayer.State) {
@@ -189,16 +307,29 @@ class AlarmRingService : Service() {
     }
 
     /** 占位前台通知，保证服务在 5 秒内进入前台状态 */
-    private fun startForegroundPlaceholder() {
+    private fun startForegroundPlaceholder(alarmId: Long) {
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            REQUEST_CONTENT,
+            Intent(this, AlarmRingActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                .setData(Uri.parse("hpalarm://ring/$alarmId"))
+                .putExtra(EXTRA_ALARM_ID, alarmId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = NotificationCompat.Builder(this, AlarmApp.CHANNEL_RING)
             .setSmallIcon(R.drawable.ic_stat_alarm)
             .setContentTitle(getString(R.string.app_name))
             .setContentText("闹钟即将响起…")
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setSilent(true)
+            .setContentIntent(contentIntent)
+            .setFullScreenIntent(contentIntent, true)
             .build()
-        runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType()) }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType())
     }
 
     private fun foregroundServiceType(): Int =
@@ -227,9 +358,7 @@ class AlarmRingService : Service() {
         )
         val notification = buildNotification(item, status)
         if (foreground) {
-            runCatching {
-                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType())
-            }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, foregroundServiceType())
         } else {
             // 通知权限被拒时显式跳过（Lint 要求），不中断响铃
             if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
@@ -247,29 +376,89 @@ class AlarmRingService : Service() {
         }
     }
 
-    private fun dismiss() {
+    private fun dismiss(continueQueue: Boolean = true) {
+        val request = pendingSnooze
+        if (request != null && request.alarmId == alarm?.id) {
+            // 先阻止继续响铃，待贪睡事务提交/回滚之后才能停止服务。
+            request.cancelled = true
+            player.stop()
+            autoStopJob?.cancel()
+            alarm?.let { publish(it, "正在取消贪睡…", viaHeadphone = false) }
+            return
+        }
+        startJob?.cancel()
+        startJob = null
+        currentPrepared = null
+        loadingAlarmId = null
+        currentFire = null
+        alarm = null
         autoStopJob?.cancel()
+        autoStopJob = null
         player.stop()
+        if (!continueQueue) queuedFires.clear()
+        val next = queuedFires.pollFirst()
+        if (next != null) {
+            // 保留前台身份；beginRinging 同步替换旧闹钟的界面状态和通知。
+            releaseWakeLock()
+            beginRinging(next.request, next.prepared)
+            return
+        }
         releaseWakeLock()
         _state.value = null
-        NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID)
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        runCatching { NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID) }
+            .onFailure { Log.w(TAG, "关闭响铃通知失败", it) }
+        runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
+            .onFailure { Log.w(TAG, "退出前台服务失败", it) }
+        stopSelfResult(lastStartId)
     }
 
     private fun snooze() {
         val item = alarm ?: return dismiss()
-        app.alarmScheduler.scheduleSnooze(item, item.snoozeMinutes)
-        // 一次性闹钟触发即被消费、列表开关显示为关闭，但贪睡确实会再响一次。
-        // 给出明确提示，避免用户误以为闹钟已彻底关闭（贪睡状态可见反馈）。
-        notifySnoozedUntil(item.snoozeMinutes)
-        dismiss()
+        if (pendingSnooze != null) return
+        val request = SnoozeRequest(item.id)
+        pendingSnooze = request
+        autoStopJob?.cancel()
+        publish(item, "正在设置贪睡…", _state.value?.viaHeadphone == true)
+        app.launchSnoozeTransaction {
+            try {
+                // 事务由 Application 持有：即使服务销毁，也要完成写盘和必要的撤销。
+                val until = app.alarmOperations.snooze(item)
+                if (until != null && request.cancelled) {
+                    app.alarmOperations.cancelSnooze(item.id, until)
+                }
+                if (pendingSnooze !== request) return@launchSnoozeTransaction
+                pendingSnooze = null
+                if (request.cancelled) {
+                    dismiss()
+                } else if (until == null) {
+                    publish(item, "贪睡设置失败，请重试或关闭闹钟", _state.value?.viaHeadphone == true)
+                    scheduleAutoStop(item)
+                    Toast.makeText(this@AlarmRingService, "贪睡设置失败，闹钟未停止", Toast.LENGTH_LONG).show()
+                } else {
+                    // 一次性闹钟虽已关闭，但已持久化的贪睡仍会再响。
+                    notifySnoozedUntil(until)
+                    dismiss()
+                }
+            } catch (error: Exception) {
+                Log.e(TAG, "贪睡设置失败 id=${item.id}", error)
+                if (pendingSnooze === request) {
+                    pendingSnooze = null
+                    if (request.cancelled) dismiss()
+                    else {
+                        publish(item, "贪睡设置失败，请重试或关闭闹钟", _state.value?.viaHeadphone == true)
+                        scheduleAutoStop(item)
+                        Toast.makeText(this@AlarmRingService, "贪睡设置失败，闹钟未停止", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } finally {
+                if (pendingSnooze === request) pendingSnooze = null
+            }
+        }
     }
 
     /** 提示「已贪睡，将于 HH:MM 再响」；界面按钮与通知按钮两个入口都会经过这里 */
-    private fun notifySnoozedUntil(minutes: Int) {
+    private fun notifySnoozedUntil(until: Long) {
         runCatching {
-            val until = System.currentTimeMillis() + minutes * 60_000L
             val time = DateFormat.getTimeFormat(this).format(java.util.Date(until))
             Toast.makeText(this, "已贪睡，将于 $time 再响", Toast.LENGTH_LONG).show()
         }
@@ -283,6 +472,7 @@ class AlarmRingService : Service() {
             REQUEST_CONTENT,
             Intent(this, AlarmRingActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                .setData(Uri.parse("hpalarm://ring/${item.id}"))
                 .putExtra(EXTRA_ALARM_ID, item.id),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -303,16 +493,18 @@ class AlarmRingService : Service() {
             .setSilent(true)
             .setContentIntent(contentIntent)
             .setFullScreenIntent(contentIntent, true)
-            .addAction(0, "贪睡 ${item.snoozeMinutes} 分钟", servicePendingIntent(REQUEST_SNOOZE, ACTION_SNOOZE))
-            .addAction(0, "关闭", servicePendingIntent(REQUEST_STOP, ACTION_STOP))
+            .addAction(0, "贪睡 ${item.snoozeMinutes} 分钟", servicePendingIntent(REQUEST_SNOOZE, ACTION_SNOOZE, item.id))
+            .addAction(0, "关闭", servicePendingIntent(REQUEST_STOP, ACTION_STOP, item.id))
             .build()
     }
 
-    private fun servicePendingIntent(requestCode: Int, action: String): PendingIntent =
+    private fun servicePendingIntent(requestCode: Int, action: String, alarmId: Long): PendingIntent =
         PendingIntent.getService(
             this,
             requestCode,
-            Intent(this, AlarmRingService::class.java).setAction(action),
+            Intent(this, AlarmRingService::class.java).setAction(action)
+                .setData(Uri.parse("hpalarm://ring/$alarmId/$action"))
+                .putExtra(EXTRA_ALARM_ID, alarmId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -322,6 +514,8 @@ class AlarmRingService : Service() {
         const val ACTION_SNOOZE = "com.headphonealarm.action.RING_SNOOZE"
         const val ACTION_BOOST = "com.headphonealarm.action.RING_BOOST"
         const val EXTRA_ALARM_ID = "extra_alarm_id"
+        const val EXTRA_SNOOZE = "extra_snooze"
+        const val EXTRA_SNOOZE_AT = "extra_snooze_at"
 
         private const val TAG = "AlarmRingService"
 
@@ -341,42 +535,53 @@ class AlarmRingService : Service() {
         /** 供 [AlarmRingActivity] 订阅的实时状态 */
         val state: StateFlow<RingUiState?> = _state.asStateFlow()
 
-        fun start(context: Context, alarmId: Long) {
+        /** True only if Android accepted a request to start the service. */
+        fun start(context: Context, alarmId: Long, isSnooze: Boolean = false, snoozeAt: Long = 0L): Boolean {
             val intent = Intent(context, AlarmRingService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_ALARM_ID, alarmId)
-            try {
-                context.startForegroundService(intent)
+                .putExtra(EXTRA_SNOOZE, isSnooze)
+                .putExtra(EXTRA_SNOOZE_AT, snoozeAt)
+            // Android 12+ 后台启动前台服务受限；精确闹钟本应豁免，但部分 ROM 仍会拦截。
+            val foregroundAccepted = runCatching { context.startForegroundService(intent) != null }
+                .onFailure { Log.e(TAG, "startForegroundService 失败 id=$alarmId，回退 startService", it) }
+                .getOrDefault(false)
+            if (foregroundAccepted) {
                 Log.i(TAG, "已请求启动响铃前台服务 id=$alarmId")
-            } catch (t: Throwable) {
-                // Android 12+ 后台启动前台服务受限；精确闹钟本应豁免，但部分 ROM 仍会拦截。
-                Log.e(TAG, "startForegroundService 失败 id=$alarmId，回退 startService", t)
-                runCatching { context.startService(intent) }
+                return true
             }
+            val fallbackAccepted = runCatching { context.startService(intent) != null }
+                .onFailure { Log.e(TAG, "startService 失败 id=$alarmId", it) }
+                .getOrDefault(false)
+            if (!fallbackAccepted) Log.e(TAG, "系统拒绝启动响铃服务 id=$alarmId")
+            return fallbackAccepted
         }
 
-        fun stop(context: Context) {
+        fun stop(context: Context, alarmId: Long) {
             // 服务未运行时 startService 可能抛异常，界面已关闭即可忽略
             runCatching {
                 context.startService(
                     Intent(context, AlarmRingService::class.java).setAction(ACTION_STOP)
+                        .putExtra(EXTRA_ALARM_ID, alarmId)
                 )
             }
         }
 
-        fun snooze(context: Context) {
+        fun snooze(context: Context, alarmId: Long) {
             runCatching {
                 context.startService(
                     Intent(context, AlarmRingService::class.java).setAction(ACTION_SNOOZE)
+                        .putExtra(EXTRA_ALARM_ID, alarmId)
                 )
             }
         }
 
         /** 响铃中用户点按“使用最大音量”：在服务内抬升媒体音量（服务已前台） */
-        fun boost(context: Context) {
+        fun boost(context: Context, alarmId: Long) {
             runCatching {
                 context.startService(
                     Intent(context, AlarmRingService::class.java).setAction(ACTION_BOOST)
+                        .putExtra(EXTRA_ALARM_ID, alarmId)
                 )
             }
         }

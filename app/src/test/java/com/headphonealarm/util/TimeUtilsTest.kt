@@ -3,6 +3,7 @@ package com.headphonealarm.util
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.util.Calendar
+import java.util.TimeZone
 
 /**
  * [TimeUtils] 展示文本的单元测试。
@@ -15,6 +16,23 @@ class TimeUtilsTest {
             set(year, month, day, hour, minute, 0)
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
+
+    @Test
+    fun nextWholeMinuteRespectsExactBoundary() {
+        val now = at(2026, Calendar.SEPTEMBER, 20, 10, 5)
+        assertEquals(now + 60_000L, TimeUtils.nextWholeMinuteAfter(now, 60_000L))
+        assertEquals(now + 120_000L, TimeUtils.nextWholeMinuteAfter(now + 1L, 60_000L))
+        assertEquals(now + 120_000L, TimeUtils.nextWholeMinuteAfter(now + 59_999L, 60_000L))
+    }
+
+    @Test
+    fun nextWholeMinuteCrossesMidnight() {
+        val beforeMidnight = at(2026, Calendar.SEPTEMBER, 20, 23, 59) + 30_000L
+        assertEquals(
+            at(2026, Calendar.SEPTEMBER, 21, 0, 1),
+            TimeUtils.nextWholeMinuteAfter(beforeMidnight, 60_000L)
+        )
+    }
 
     // region countdownText
 
@@ -60,6 +78,23 @@ class TimeUtilsTest {
         // 周日 + 3 天 = 周三
         val now = at(2026, Calendar.SEPTEMBER, 20, 8, 0)
         assertEquals("周三", TimeUtils.dayLabel(now + 3 * 86_400_000L, now))
+    }
+
+    @Test
+    fun dayLabelUsesCalendarDaysAcrossDaylightSavingChanges() {
+        val original = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("America/New_York"))
+            val beforeSpring = at(2026, Calendar.MARCH, 7, 8, 0)
+            assertEquals("明天", TimeUtils.dayLabel(at(2026, Calendar.MARCH, 8, 8, 0), beforeSpring))
+            assertEquals("后天", TimeUtils.dayLabel(at(2026, Calendar.MARCH, 9, 8, 0), beforeSpring))
+
+            val beforeAutumn = at(2026, Calendar.OCTOBER, 31, 8, 0)
+            assertEquals("明天", TimeUtils.dayLabel(at(2026, Calendar.NOVEMBER, 1, 8, 0), beforeAutumn))
+            assertEquals("后天", TimeUtils.dayLabel(at(2026, Calendar.NOVEMBER, 2, 8, 0), beforeAutumn))
+        } finally {
+            TimeZone.setDefault(original)
+        }
     }
 
     // endregion

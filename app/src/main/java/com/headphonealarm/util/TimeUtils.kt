@@ -5,6 +5,17 @@ import java.util.concurrent.TimeUnit
 
 object TimeUtils {
 
+    /** Next whole minute at least [minimumDelayMillis] ahead (alarm items store minutes only). */
+    fun nextWholeMinuteAfter(now: Long, minimumDelayMillis: Long): Long {
+        val target = Calendar.getInstance().apply {
+            timeInMillis = now + minimumDelayMillis
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+            if (timeInMillis < now + minimumDelayMillis) add(Calendar.MINUTE, 1)
+        }
+        return target.timeInMillis
+    }
+
     /** 距离目标时间的可读倒计时，如「2 小时 13 分后」 */
     fun countdownText(targetMillis: Long, now: Long = System.currentTimeMillis()): String {
         val diff = targetMillis - now
@@ -24,24 +35,17 @@ object TimeUtils {
     /** 目标日期的星期描述，如「今天 07:30」「明天 07:30」「周三 07:30」 */
     fun dayLabel(targetMillis: Long, now: Long = System.currentTimeMillis()): String {
         val target = Calendar.getInstance().apply { timeInMillis = targetMillis }
-        val today = Calendar.getInstance().apply {
-            timeInMillis = now
-            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0)
-            set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        val today = Calendar.getInstance().apply { timeInMillis = now }
+        val labels = arrayOf("今天", "明天", "后天")
+        // 夏令时切换时自然日不一定是 24 小时，逐个日历日比较。
+        repeat(3) { offset ->
+            if (today.get(Calendar.ERA) == target.get(Calendar.ERA) &&
+                today.get(Calendar.YEAR) == target.get(Calendar.YEAR) &&
+                today.get(Calendar.DAY_OF_YEAR) == target.get(Calendar.DAY_OF_YEAR)
+            ) return labels[offset]
+            today.add(Calendar.DAY_OF_YEAR, 1)
         }
-        val targetDay = target.clone() as Calendar
-        targetDay.set(Calendar.HOUR_OF_DAY, 0)
-        targetDay.set(Calendar.MINUTE, 0)
-        targetDay.set(Calendar.SECOND, 0)
-        targetDay.set(Calendar.MILLISECOND, 0)
-
-        val days = ((targetDay.timeInMillis - today.timeInMillis) / 86_400_000L).toInt()
-        return when (days) {
-            0 -> "今天"
-            1 -> "明天"
-            2 -> "后天"
-            else -> AlarmDayName.of(target)
-        }
+        return AlarmDayName.of(target)
     }
 
     /** 音量渐强时长的可读文本 */

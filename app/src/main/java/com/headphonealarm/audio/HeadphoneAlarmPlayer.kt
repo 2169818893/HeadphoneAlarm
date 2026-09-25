@@ -23,6 +23,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.headphonealarm.data.AlarmItem
 import com.headphonealarm.data.NoHeadphoneAction
+import com.headphonealarm.util.RingtoneImporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,14 +35,14 @@ import kotlinx.coroutines.launch
 import kotlin.math.pow
 
 /**
- * 闹钟播放器：**只在耳机上出声**，从原理上避免外放到扬声器。
+ * 闹钟播放器：耳机模式仅在确认实际路由为耳机后出声；用户选择外放策略时可使用扬声器。
  *
  * 四层保障（`setPreferredDevice` 只是「偏好」，系统策略尤其蓝牙有最终决定权，所以必须层层兜底）：
- * 1. 播放前必须存在耳机设备才会启动 MediaPlayer（无耳机就完全不产生音频流）；
- * 2. API 28+ 调用 [MediaPlayer.setPreferredDevice]，并在 prepare 前后、start 前及每次路由变化后重复声明；
+ * 1. 耳机模式在播放前必须存在耳机设备（没有耳机就不产生音频流）；
+ * 2. 声明 [MediaPlayer.setPreferredDevice]，并在 prepare 前后、start 前及每次路由变化后重复声明；
  * 3. 播放开始时静音，只有巡检确认实际输出是耳机后才开始出声并渐强；
  * 4. 播放中每 600ms 巡检 [MediaPlayer.getRoutedDevice]，配合插拔回调与
- *    `ACTION_AUDIO_BECOMING_NOISY`，一旦发现输出落到非耳机设备立刻暂停。
+ *    `ACTION_AUDIO_BECOMING_NOISY`，一旦发现输出落到非耳机设备立刻静音并等待恢复。
  */
 class HeadphoneAlarmPlayer(private val context: Context) {
 
@@ -74,20 +75,26 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     private var focusRequest: AudioFocusRequest? = null
     private var rampJob: Job? = null
     private var routeMonitorJob: Job? = null
+    /** 只有实际输出设备被验证为耳机时，才允许向播放器写入非零增益。 */
+    private var headphoneRouteConfirmed = false
+    /** 允许扬声器是显式策略，而不是通过首选设备是否为空来推断。 */
+    private var headphoneMode = false
 
     /** 期望的输出设备。路由变化后偏好可能失效，需要重新声明 */
     private var preferredDevice: AudioDeviceInfo? = null
     private var noisyReceiverRegistered = false
 
     /** 蓝牙媒体音量兜底：响铃时媒体音量过低会临时抬高，停止后恢复原值 */
-    private var savedMusicVolume = -1
-    private var mediaVolumeRaised = false
+    private val mediaVolumeOverride = MediaVolumeOverride()
 
     /** 系统在耳机/蓝牙断开前会发这个广播，提示音频即将回落到扬声器 */
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                pauseForSafety("音频输出已断开，已自动静音")
+                if (mediaPlayer?.let { !muteUnsafeRoute(it) } == true) return
+                if (detector.findHeadphone() == null) {
+                    pauseForSafety("音频输出已断开，已自动静音")
+                }
             }
         }
     }
@@ -150,19 +157,20 @@ class HeadphoneAlarmPlayer(private val context: Context) {
      * 压低，需用户到系统“声音 → 媒体音量安全/降低过大音量”里关闭该保护。
      */
     fun boostToMaxVolume() {
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        if (max <= 0) return
-        if (savedMusicVolume < 0) {
-            savedMusicVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val mp = mediaPlayer ?: return
+        if (!safeToOutput(mp)) {
+            muteUnsafeRoute(mp)
+            return
         }
-        runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0) }
-        mediaVolumeRaised = true
-        mediaPlayer?.let { mp ->
-            val targetGain = percentToGain((alarm?.maxVolumePercent ?: 100) / 100f)
-            rampJob?.cancel()
-            runCatching { mp.setVolume(targetGain, targetGain) }
-            emitVolume(1f)
+        if (!headphoneMode) return // 扬声器模式使用闹钟音量流，不能修改媒体流音量
+        raiseMediaVolumeToMax()
+        val targetGain = percentToGain((alarm?.maxVolumePercent ?: 100) / 100f)
+        rampJob?.cancel()
+        if (!safeToOutput(mp)) {
+            muteUnsafeRoute(mp)
+            return
         }
+        if (setPlaybackVolume(mp, targetGain)) emitVolume(1f)
     }
 
     /** 服务销毁时调用，不可再次使用 */
@@ -176,6 +184,13 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     // region 内部实现
 
     private fun play(alarm: AlarmItem, device: AudioDeviceInfo?, enforceHeadphone: Boolean) {
+        headphoneMode = enforceHeadphone
+        if (enforceHeadphone && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            // MediaPlayer 路由查询/指定输出从 API 28 才可用；早期系统无法保证不外放。
+            if (alarm.vibrate) startVibration(alarm)
+            emit(State.WaitingHeadphone("系统版本无法验证耳机输出，已保持静音"))
+            return
+        }
         // 走耳机时统一使用 USAGE_MEDIA：
         // 1. 蓝牙 A2DP 只承载媒体流，USAGE_ALARM 会被系统强制留在机身扬声器；
         // 2. 部分机型为保证响铃可靠性把闹钟流锁在扬声器，插着有线耳机也会外放；
@@ -212,19 +227,30 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         // 关键保护：在确认实际输出设备之前保持完全静音。
         // 万一系统的音频策略忽略了"偏好"而路由到扬声器，也不会漏出任何声音。
         runCatching { player.setVolume(0f, 0f) }
+            .onFailure { error ->
+                // Do not start a stream that could still be audible on the speaker.
+                runCatching { player.release() }
+                mediaPlayer = null
+                preferredDevice = null
+                emit(State.Failed(error.message ?: "无法安全设置音频音量"))
+                return
+            }
 
         runCatching { player.start() }
             .onFailure {
+                runCatching { player.release() }
+                mediaPlayer = null
+                preferredDevice = null
                 emit(State.Failed(it.message ?: "音频启动失败"))
                 return
             }
 
         requestFocus(attributes)
-        // 走媒体流：抬满媒体音量，响度完全由播放器增益（音量上限）决定
-        if (useMediaStream) raiseMediaVolumeToMax()
+        // 走媒体流时只有确认实际路由是耳机，才抬升系统媒体音量。
         if (alarm.vibrate) startVibration(alarm)
 
         if (enforceHeadphone) {
+            emit(State.WaitingHeadphone("正在确认耳机输出，确认前保持静音"))
             attachRoutingGuard(player)
             registerNoisyReceiver()
             watchForDisconnect()
@@ -232,9 +258,10 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             startRouteMonitor(player, alarm)
         } else {
             startVolumeRamp(player, alarm)
+            if (mediaPlayer === player) {
+                emit(State.Playing(viaHeadphone = false, deviceName = null))
+            }
         }
-
-        emit(State.Playing(viaHeadphone = enforceHeadphone, deviceName = device?.productName?.toString()))
     }
 
     /**
@@ -246,26 +273,37 @@ class HeadphoneAlarmPlayer(private val context: Context) {
      * （即音量上限百分比，已按 dB 感知映射）决定，跨设备一致且渐强全程有效。
      */
     private fun raiseMediaVolumeToMax() {
-        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        if (max <= 0) return
-        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        if (current < max) {
-            savedMusicVolume = current
-            runCatching { audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0) }
-                .onFailure { Log.w(TAG, "抬升媒体音量被系统拒绝: ${it.message}") }
-            mediaVolumeRaised = true
-        }
+        val route = connectedRouteId() ?: return
+        runCatching {
+            val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            if (max <= 0) return
+            val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            mediaVolumeOverride.observe(current, route)
+            if (current >= max) return
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+            // Android may silently clamp a safe-media-volume write. Track only its actual
+            // effect; never restore a failed write or a volume set on a different route.
+            if (connectedRouteId() == route) {
+                val after = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                mediaVolumeOverride.recordIncrease(current, after, route)
+            }
+        }.onFailure { Log.w(TAG, "抬升媒体音量被系统拒绝", it) }
     }
 
     private fun restoreMediaVolume() {
-        if (!mediaVolumeRaised) return
+        val route = connectedRouteId()
+        val current = runCatching { audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) }.getOrNull()
+        val original = mediaVolumeOverride.takeRestoration(current, route) ?: return
         runCatching {
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_MUSIC, savedMusicVolume.coerceAtLeast(0), 0
-            )
-        }
-        mediaVolumeRaised = false
-        savedMusicVolume = -1
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, original, 0)
+        }.onFailure { Log.w(TAG, "恢复媒体音量失败", it) }
+    }
+
+    private fun connectedRouteId(): Int? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        return runCatching {
+        mediaPlayer?.routedDevice?.takeIf(detector::isConnectedHeadphone)?.id
+        }.getOrNull()
     }
 
     private fun createPlayer(
@@ -302,7 +340,9 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun resolveUri(alarm: AlarmItem): Uri =
-        alarm.ringtoneUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) } ?: defaultAlarmUri()
+        alarm.ringtoneUri?.takeIf { it.isNotBlank() }?.let {
+            RingtoneImporter.resolveOwnedUri(context, it) ?: Uri.parse(it)
+        } ?: defaultAlarmUri()
 
     /** 系统默认闹钟铃声，多级回退保证非空 */
     private fun defaultAlarmUri(): Uri =
@@ -327,12 +367,13 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         val fromGain = percentToGain(alarm.rampStartPercent / 100f).coerceAtMost(targetGain)
 
         if (rampSeconds == 0 || fromGain >= targetGain) {
-            runCatching { player.setVolume(targetGain, targetGain) }
-            emitVolume(1f)
+            if (!safeToOutput(player)) return
+            if (setPlaybackVolume(player, targetGain)) emitVolume(1f)
             return
         }
 
-        runCatching { player.setVolume(fromGain, fromGain) }
+        if (!safeToOutput(player)) return
+        if (!setPlaybackVolume(player, fromGain)) return
         emitVolume(0f)
 
         rampJob = scope.launch {
@@ -340,14 +381,36 @@ class HeadphoneAlarmPlayer(private val context: Context) {
             val ratio = targetGain / fromGain
             repeat(steps) { index ->
                 delay(STEP_INTERVAL_MS)
+                if (!safeToOutput(player)) {
+                    muteUnsafeRoute(player)
+                    return@launch
+                }
                 val progress = (index + 1).toFloat() / steps
                 val volume = fromGain * ratio.pow(progress)
-                runCatching { player.setVolume(volume, volume) }
+                if (!setPlaybackVolume(player, volume)) return@launch
                 emitVolume(progress)
             }
-            runCatching { player.setVolume(targetGain, targetGain) }
-            emitVolume(1f)
+            if (!safeToOutput(player)) return@launch
+            if (setPlaybackVolume(player, targetGain)) emitVolume(1f)
         }
+    }
+
+    /** A failed gain change leaves the previous (possibly audible) gain in place. */
+    private fun setPlaybackVolume(player: MediaPlayer, gain: Float): Boolean {
+        if (mediaPlayer !== player) return false
+        return runCatching { player.setVolume(gain, gain) }.fold(
+            onSuccess = { true },
+            onFailure = { error ->
+                Log.e(TAG, "播放音量设置失败，销毁音频通道", error)
+                if (headphoneMode) {
+                    pauseForSafety("无法安全设置音量，已停止音频播放；请关闭闹钟并检查设备", retryOnConnect = false)
+                } else {
+                    stopInternal(notify = false)
+                    emit(State.Failed("无法设置播放音量，已停止播放"))
+                }
+                false
+            }
+        )
     }
 
     /**
@@ -366,6 +429,11 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         volumeListener?.invoke(progress)
     }
 
+    private fun safeToOutput(player: MediaPlayer): Boolean =
+        mediaPlayer === player && (!headphoneMode || (headphoneRouteConfirmed &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
+            detector.isConnectedHeadphone(runCatching { player.routedDevice }.getOrNull())))
+
     /**
      * 持续校验实际输出设备。
      *
@@ -374,56 +442,40 @@ class HeadphoneAlarmPlayer(private val context: Context) {
      * 2. 系统在耳机/蓝牙断开时会把音频回落到扬声器；
      * 3. `getRoutedDevice()` 在音频通道未完全激活时会返回 null。
      *
-     * 因此：输出确认落到非耳机 → 立即静音；长时间拿不到路由信息但耳机仍在线 →
-     * 信任已声明的首选设备开始出声（避免部分机型「插着耳机也永不响」）；
-     * 耳机已消失 → 静音。真正的扬声器外放由「非耳机路由」与插拔/noisy 广播兜底拦截。
-     *
-     * 另外，播放开始时音量是 0，**只有在首次确认路由为耳机之后才开始出声**，
-     * 这样即使系统忽略了偏好，也不会有一瞬间的外放。
+     * 任何非耳机/未知路由都立即静音；只有确认为耳机才可渐强。宁可部分
+     * 不报告路由的设备保持静默，也不能仅凭「耳机在线」猜测音频实际走向。
      */
     private fun startRouteMonitor(player: MediaPlayer, alarm: AlarmItem) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         routeMonitorJob?.cancel()
         routeMonitorJob = scope.launch {
             val startedAt = System.currentTimeMillis()
-            var confirmed = false
             var offHeadphoneStreak = 0
             while (isActive) {
                 delay(ROUTE_CHECK_INTERVAL_MS)
-                // getRoutedDevice 是 API 28：低版本视为路由未知（null），
-                // 走宽限期后信任耳机在线的既有兜底，行为不变
-                val routed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    runCatching { player.routedDevice }.getOrNull()
-                } else {
-                    null
-                }
+                val routed = runCatching { player.routedDevice }.getOrNull()
                 when {
-                    detector.isHeadphone(routed) -> {
+                    detector.isConnectedHeadphone(routed) -> {
                         offHeadphoneStreak = 0
-                        if (!confirmed) {
-                            confirmed = true
-                            startVolumeRamp(player, alarm)
-                        }
+                        confirmHeadphoneRoute(player, alarm)
                         // 重路由后偏好会丢失，周期性重新声明
                         applyPreferredDevice(player, preferredDevice)
                     }
 
                     routed == null -> {
-                        // 拿不到路由（蓝牙建链中很常见）：宽限期后只要耳机仍在线就信任首选设备出声，
-                        // 只有耳机确实消失才判定为不安全并静音。
-                        if (!confirmed && System.currentTimeMillis() - startedAt > ROUTE_GRACE_MS) {
-                            if (detector.findHeadphone() != null) {
-                                confirmed = true
-                                startVolumeRamp(player, alarm)
-                            } else {
-                                pauseForSafety("耳机已断开，无法确认输出，已自动静音")
-                                return@launch
-                            }
+                        if (!muteUnsafeRoute(player)) return@launch
+                        if (detector.findHeadphone() == null) {
+                            pauseForSafety("耳机已断开，无法确认输出，已自动静音")
+                            return@launch
+                        }
+                        if (System.currentTimeMillis() - startedAt > ROUTE_GRACE_MS) {
+                            emit(State.WaitingHeadphone("无法确认耳机输出，保持静音并等待路由恢复"))
                         }
                     }
 
                     else -> {
-                        // 明确路由到非耳机（扬声器）。蓝牙唤醒会有瞬时抖动，
-                        // 连续多次确认才静音，避免误杀导致提示闪烁。
+                        // 即使蓝牙短暂抖动，也只能宽限状态提示，不能宽限出声。
+                        if (!muteUnsafeRoute(player)) return@launch
                         offHeadphoneStreak++
                         if (detector.findHeadphone() == null) {
                             pauseForSafety("耳机已断开，已自动静音")
@@ -431,9 +483,8 @@ class HeadphoneAlarmPlayer(private val context: Context) {
                         } else if (offHeadphoneStreak >= OFF_HEADPHONE_STREAK_LIMIT &&
                             System.currentTimeMillis() - startedAt > ROUTE_GRACE_MS
                         ) {
-                            // 耳机在，但音频持续走扬声器：确实无法路由到耳机，为“绝不外放”而静音
-                            pauseForSafety("音频持续走扬声器，已自动静音（请检查蓝牙耳机连接）")
-                            return@launch
+                            emit(State.WaitingHeadphone("音频走扬声器，保持静音并等待路由恢复"))
+                            applyPreferredDevice(player, preferredDevice)
                         } else {
                             applyPreferredDevice(player, preferredDevice)
                         }
@@ -444,18 +495,48 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun attachRoutingGuard(player: MediaPlayer) {
-        // MediaPlayer 的 addOnRoutingChangedListener 是 API 28
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         val listener = AudioRouting.OnRoutingChangedListener { router ->
-            // 路由事件多为蓝牙唤醒/临时回落扬声器的瞬时抖动，不在此直接判“外放”，
-            // 只重新声明首选设备；是否静音交给 startRouteMonitor 的稳定判定，避免提示闪烁。
+            if (mediaPlayer !== player) return@OnRoutingChangedListener
             val routed = runCatching { router.routedDevice }.getOrNull()
-            if (routed == null || detector.isHeadphone(routed)) {
+            if (!detector.isConnectedHeadphone(routed)) {
+                if (!muteUnsafeRoute(player)) return@OnRoutingChangedListener
+            } else {
+                alarm?.let { confirmHeadphoneRoute(player, it) }
                 applyPreferredDevice(player, preferredDevice)
             }
         }
         runCatching { player.addOnRoutingChangedListener(listener, mainHandler) }
             .onSuccess { routingListener = listener }
+    }
+
+    /** 静音失败时立即销毁音频通道，而非让之前的增益在扬声器上继续播放。 */
+    private fun muteUnsafeRoute(player: MediaPlayer): Boolean {
+        if (mediaPlayer !== player) return false
+        headphoneRouteConfirmed = false
+        rampJob?.cancel()
+        runCatching { player.setVolume(0f, 0f) }
+            .onFailure { error ->
+                Log.e(TAG, "无法安全静音，销毁音频通道", error)
+                pauseForSafety("无法安全静音，已停止音频播放；请关闭闹钟并检查设备", retryOnConnect = false)
+                return false
+            }
+        emitVolume(0f)
+        if (state is State.Playing) {
+            emit(State.WaitingHeadphone("耳机路由中断，已静音并等待恢复"))
+        }
+        return true
+    }
+
+    private fun confirmHeadphoneRoute(player: MediaPlayer, alarm: AlarmItem) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            headphoneRouteConfirmed || mediaPlayer !== player ||
+            !detector.isConnectedHeadphone(runCatching { player.routedDevice }.getOrNull())) return
+        headphoneRouteConfirmed = true
+        raiseMediaVolumeToMax()
+        startVolumeRamp(player, alarm)
+        if (mediaPlayer !== player) return
+        emit(State.Playing(viaHeadphone = true, deviceName = preferredDevice?.productName?.toString()))
     }
 
     private fun registerNoisyReceiver() {
@@ -480,11 +561,26 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     private fun watchForDisconnect() {
         deviceRegistration?.release()
         deviceRegistration = detector.register(object : HeadphoneDetector.Callback {
-            override fun onHeadphoneConnected() = Unit
+            override fun onHeadphoneConnected() {
+                val replacement = detector.findHeadphone() ?: return
+                if (preferredDevice?.id != replacement.id) {
+                    // An added wired headset can supersede Bluetooth, or a disconnected
+                    // headset can reconnect before the removal callback reaches us. The old
+                    // preference may no longer be usable: mute until the new route is verified.
+                    if (mediaPlayer?.let { !muteUnsafeRoute(it) } == true) return
+                    preferredDevice = replacement
+                    mediaPlayer?.let { applyPreferredDevice(it, replacement) }
+                }
+            }
 
             override fun onHeadphoneDisconnected() {
-                if (detector.findHeadphone() == null) {
+                if (mediaPlayer?.let { !muteUnsafeRoute(it) } == true) return
+                val replacement = detector.findHeadphone()
+                if (replacement == null) {
                     pauseForSafety("耳机已拔出，等待重新接入")
+                } else {
+                    preferredDevice = replacement
+                    mediaPlayer?.let { applyPreferredDevice(it, replacement) }
                 }
             }
         })
@@ -502,8 +598,11 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         })
     }
 
-    /** 安全暂停：销毁音频通道但保留震动与耳机监听 */
-    private fun pauseForSafety(reason: String) {
+    /** 安全暂停：销毁音频通道但保留震动；仅正常断线时等待重新接入。 */
+    private fun pauseForSafety(reason: String, retryOnConnect: Boolean = true) {
+        // 不能递归调用 muteUnsafeRoute：它的失败路径会调用 pauseForSafety。
+        runCatching { mediaPlayer?.setVolume(0f, 0f) }
+        restoreMediaVolume()
         rampJob?.cancel()
         routeMonitorJob?.cancel()
         releaseRoutingListener()
@@ -512,9 +611,18 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         runCatching { mediaPlayer?.release() }
         mediaPlayer = null
         preferredDevice = null
+        headphoneRouteConfirmed = false
         abandonFocus()
-        watchForHeadphone()
-        emit(State.WaitingHeadphone(reason))
+        deviceRegistration?.release()
+        deviceRegistration = null
+        if (retryOnConnect) {
+            watchForHeadphone()
+            emit(State.WaitingHeadphone(reason))
+        } else {
+            // 注册监听时 Android 会立即回调当前已连接设备；音频增益故障不能
+            // 借这个初始回调不断创建新播放器，直到设备反复失败/耗尽资源。
+            emit(State.Failed(reason))
+        }
     }
 
     private fun startVibration(alarm: AlarmItem) {
@@ -553,7 +661,6 @@ class HeadphoneAlarmPlayer(private val context: Context) {
 
     private fun releaseRoutingListener() {
         val listener = routingListener ?: return
-        // removeOnRoutingChangedListener 同为 API 28；listener 只会在 28+ 被赋值，双保险
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { mediaPlayer?.removeOnRoutingChangedListener(listener) }
         }
@@ -561,6 +668,9 @@ class HeadphoneAlarmPlayer(private val context: Context) {
     }
 
     private fun stopInternal(notify: Boolean) {
+        // 直接清理，不在静音失败后重新注册耳机监听。
+        runCatching { mediaPlayer?.setVolume(0f, 0f) }
+        restoreMediaVolume()
         rampJob?.cancel()
         routeMonitorJob?.cancel()
         releaseRoutingListener()
@@ -569,10 +679,11 @@ class HeadphoneAlarmPlayer(private val context: Context) {
         runCatching { mediaPlayer?.release() }
         mediaPlayer = null
         preferredDevice = null
+        headphoneRouteConfirmed = false
+        headphoneMode = false
         deviceRegistration?.release()
         deviceRegistration = null
         abandonFocus()
-        restoreMediaVolume()
         runCatching { vibrator?.cancel() }
         vibrator = null
         alarm = null

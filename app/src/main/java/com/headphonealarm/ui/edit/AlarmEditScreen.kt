@@ -2,7 +2,9 @@ package com.headphonealarm.ui.edit
 
 import android.app.Application
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -91,8 +93,12 @@ import com.headphonealarm.ui.components.TimeWheel
 import com.headphonealarm.util.RingtoneImporter
 import com.headphonealarm.util.TimeUtils
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -113,6 +119,11 @@ fun AlarmEditScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
+    val busy by viewModel.busy.collectAsStateWithLifecycle()
+    val importing by viewModel.importing.collectAsStateWithLifecycle()
+    val loadError by viewModel.loadError.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    BackHandler(enabled = busy) { /* Wait for persistence and scheduling before leaving. */ }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -132,7 +143,7 @@ fun AlarmEditScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBack, enabled = !busy) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -153,7 +164,14 @@ fun AlarmEditScreen(
                     .padding(top = scaffoldPadding.calculateTopPadding()),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator()
+                if (loadError == null) {
+                    CircularProgressIndicator()
+                } else {
+                    GlassCard {
+                        Text(loadError!!, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = onBack) { Text("返回列表") }
+                    }
+                }
             }
             return@Scaffold
         }
@@ -283,7 +301,7 @@ fun AlarmEditScreen(
                     SettingRow(
                         icon = Icons.Outlined.Headphones,
                         title = "仅通过耳机播放",
-                        subtitle = "强制把闹钟音频路由到已连接的耳机，绝不经扬声器外放",
+                        subtitle = "优先通过已连接的耳机播放；无耳机时可选等待、震动或允许外放",
                         trailing = {
                             Switch(
                                 checked = state.headphoneOnly,
@@ -441,6 +459,7 @@ fun AlarmEditScreen(
             item {
                 Button(
                     onClick = viewModel::save,
+                    enabled = !busy && !importing,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
@@ -457,6 +476,7 @@ fun AlarmEditScreen(
                 item {
                     TextButton(
                         onClick = viewModel::delete,
+                        enabled = !busy && !importing,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
@@ -480,6 +500,7 @@ fun AlarmEditScreen(
     LaunchedEffect(viewModel) {
         viewModel.saved.first { it }
         viewModel.stopPreview()
+        viewModel.scheduleWarning.value?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
         onBack()
     }
 
@@ -628,13 +649,23 @@ class AlarmEditViewModel(
 
     private val app = AlarmApp.from(application)
     private val repository = app.alarmRepository
-    private val scheduler = app.alarmScheduler
+    private val operations = app.alarmOperations
 
     private val _state = MutableStateFlow(AlarmEditState())
     val state: StateFlow<AlarmEditState> = _state.asStateFlow()
+    private val _loadError = MutableStateFlow<String?>(null)
+    val loadError: StateFlow<String?> = _loadError.asStateFlow()
 
     private val _saved = MutableStateFlow(false)
     val saved: StateFlow<Boolean> = _saved.asStateFlow()
+
+    private val _scheduleWarning = MutableStateFlow<String?>(null)
+    val scheduleWarning: StateFlow<String?> = _scheduleWarning.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+    private val _importing = MutableStateFlow(false)
+    val importing: StateFlow<Boolean> = _importing.asStateFlow()
 
     /** 导入 / 试听的反馈信息，让失败不再静默 */
     private val _message = MutableStateFlow<String?>(null)
@@ -646,14 +677,25 @@ class AlarmEditViewModel(
 
     /** 本次编辑会话导入的自定义铃声 URI；离开页面时清理其中未保存的，避免私有目录只增不减 */
     private val sessionImportedUris = mutableListOf<String>()
+    // A SAF provider can finish a synchronous copy after this ViewModel is cleared.
+    private val importScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var activeImports = 0
+    private var importSequence = 0L
+    private var closed = false
+    private val importJobs = mutableListOf<Job>()
+    private var mutationJob: Job? = null
 
     var previewingKey by mutableStateOf<String?>(null)
         private set
 
     init {
         viewModelScope.launch {
-            if (alarmId > 0) {
-                repository.getById(alarmId)?.let { item ->
+            try {
+                // Even the new-alarm screen must confirm the store is readable first.
+                val stored = repository.alarms.first()
+                if (alarmId > 0) {
+                    val item = stored.firstOrNull { it.id == alarmId }
+                        ?: error("闹钟不存在或已被删除，未修改数据")
                     enabled = item.enabled
                     _state.value = AlarmEditState(
                         hour = item.hour,
@@ -672,14 +714,18 @@ class AlarmEditViewModel(
                         autoStopMinutes = item.autoStopMinutes,
                         loaded = true
                     )
+                } else {
+                    val now = java.util.Calendar.getInstance()
+                    _state.value = _state.value.copy(
+                        hour = now.get(java.util.Calendar.HOUR_OF_DAY),
+                        minute = now.get(java.util.Calendar.MINUTE),
+                        loaded = true
+                    )
                 }
-            } else {
-                val now = java.util.Calendar.getInstance()
-                _state.value = _state.value.copy(
-                    hour = now.get(java.util.Calendar.HOUR_OF_DAY),
-                    minute = now.get(java.util.Calendar.MINUTE),
-                    loaded = true
-                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _loadError.value = "闹钟读取失败，未修改数据：" + (error.message ?: "未知错误")
             }
         }
     }
@@ -714,49 +760,60 @@ class AlarmEditViewModel(
         current.copy(repeatDays = days)
     }
 
-    fun selectDefaultRingtone() =
+    fun selectDefaultRingtone() {
+        importSequence++
         update { it.copy(ringtoneUri = null, ringtoneName = "") }
+    }
 
-    fun selectBuiltInTone(tone: BuiltInTones.Tone) = update {
-        it.copy(
-            ringtoneUri = BuiltInTones.uriFor(getApplication(), tone),
-            ringtoneName = tone.name
-        )
+    fun selectBuiltInTone(tone: BuiltInTones.Tone) {
+        importSequence++
+        update {
+            it.copy(
+                ringtoneUri = BuiltInTones.uriFor(getApplication(), tone),
+                ringtoneName = tone.name
+            )
+        }
     }
 
     /** 导入本地音频：复制进私有目录后使用稳定的本地路径 */
     fun importCustomRingtone(uri: Uri) {
-        viewModelScope.launch {
-            _message.value = "正在导入音频…"
-            val result = withContext(Dispatchers.IO) {
-                RingtoneImporter.import(getApplication(), uri)
-            }
-            result
-                .onSuccess { imported ->
-                    val newUri = RingtoneImporter.toUriString(imported.file)
-                    // 本次会话此前导入、已被这次替换的文件：清理掉，避免未保存就堆积
-                    val stale = sessionImportedUris.filterNot { it == newUri }
-                    sessionImportedUris.clear()
-                    sessionImportedUris.add(newUri)
-                    update {
-                        it.copy(ringtoneUri = newUri, ringtoneName = imported.displayName)
+        if (closed || _busy.value) return
+        val sequence = ++importSequence
+        activeImports++
+        _importing.value = true
+        val job = importScope.launch {
+            try {
+                _message.value = "正在导入音频…"
+                val result = withContext(Dispatchers.IO) {
+                    RingtoneImporter.import(getApplication(), uri)
+                }
+                result
+                    .onSuccess { imported ->
+                        val newUri = RingtoneImporter.toUriString(imported.file)
+                        if (closed || sequence != importSequence || _busy.value || _saved.value) {
+                            operations.cleanupRingtones(listOf(newUri))
+                            return@onSuccess
+                        }
+                        // 本次会话此前导入、已被这次替换的文件：清理掉，避免未保存就堆积
+                        val stale = sessionImportedUris.filterNot { it == newUri }
+                        sessionImportedUris.clear()
+                        sessionImportedUris.add(newUri)
+                        update {
+                            it.copy(ringtoneUri = newUri, ringtoneName = imported.displayName)
+                        }
+                        _message.value = "已导入「${imported.displayName}」，点右侧 ▶ 试听"
+                        operations.cleanupRingtones(stale)
                     }
-                    _message.value = "已导入「${imported.displayName}」，点右侧 ▶ 试听"
-                    cleanupRingtones(stale)
-                }
-                .onFailure { error ->
-                    _message.value = "导入失败：${error.message ?: "未知错误"}"
-                }
+                    .onFailure { error ->
+                        if (closed || sequence != importSequence) return@onFailure
+                        _message.value = "导入失败：${error.message ?: "未知错误"}"
+                    }
+            } finally {
+                activeImports--
+                _importing.value = activeImports > 0
+            }
         }
-    }
-
-    /** 删除不再被任何闹钟引用的自定义铃声文件（IO 线程执行，带引用检查防误删） */
-    private suspend fun cleanupRingtones(uris: List<String>) {
-        if (uris.isEmpty()) return
-        val referenced = repository.alarms.first().mapNotNull { it.ringtoneUri }.toSet()
-        withContext(Dispatchers.IO) {
-            uris.forEach { RingtoneImporter.deleteOwnedRingtone(getApplication(), it, referenced) }
-        }
+        importJobs.add(job)
     }
 
     /** 试听同样走耳机独占引擎，确保与真实响铃一致 */
@@ -793,7 +850,7 @@ class AlarmEditViewModel(
                 vibrate = false,
                 // 试听铃声时不渐强，直接听到完整音色
                 volumeRampSeconds = 0,
-                // 试听与真实响铃一致：只走耳机、无耳机时静默等待并提示，绝不外放
+                // 试听固定只走耳机；正式响铃会遵从用户选择的无耳机外放策略
                 headphoneOnly = true,
                 noHeadphoneAction = NoHeadphoneAction.WAIT
             ),
@@ -821,32 +878,46 @@ class AlarmEditViewModel(
     }
 
     fun save() {
-        viewModelScope.launch {
-            val id = if (alarmId > 0) alarmId else System.currentTimeMillis()
-            // 保留原有启用状态：编辑页不展示开关，不应静默把用户已关闭的闹钟重新打开。
-            // 新建闹钟时 enabled 默认为 true，仍然会直接启用。
-            val item = _state.value.toAlarmItem(id, enabled = enabled)
-            val oldUri = if (alarmId > 0) repository.getById(alarmId)?.ringtoneUri else null
-            repository.upsert(item)
-            if (item.enabled) scheduler.schedule(item) else scheduler.cancel(item)
-            // 已保存的铃声进入被引用集合，移出待清理，避免离开页面时被误删
-            item.ringtoneUri?.let { sessionImportedUris.remove(it) }
-            // 更换过铃声：清理不再被任何闹钟引用的旧文件
-            if (oldUri != null && oldUri != item.ringtoneUri) cleanupRingtones(listOf(oldUri))
-            _saved.value = true
+        if (_busy.value || _saved.value || _importing.value || !_state.value.loaded) return
+        _busy.value = true
+        val snapshot = _state.value
+        mutationJob = viewModelScope.launch {
+            try {
+                val item = snapshot.toAlarmItem(alarmId, enabled = enabled)
+                val savedId = if (alarmId > 0) {
+                    operations.save(item, preserveEnabled = true)
+                    alarmId
+                } else {
+                    operations.create(item)
+                }
+                item.ringtoneUri?.let { sessionImportedUris.remove(it) }
+                if (savedId in operations.failedScheduleIds.value) {
+                    _scheduleWarning.value = "闹钟已保存，但系统排程失败；请在列表中检查权限并重新排程"
+                }
+                _saved.value = true
+            } catch (error: Exception) {
+                _message.value = "保存失败：" + (error.message ?: "未知错误")
+            } finally {
+                _busy.value = false
+            }
         }
     }
 
     fun delete() {
-        viewModelScope.launch {
-            if (alarmId > 0) {
-                val existing = repository.getById(alarmId)
-                repository.remove(alarmId)
-                existing?.let { scheduler.cancel(it) }
-                // 清理该闹钟独占的自定义铃声文件（仍被其它闹钟引用时会自动跳过）
-                existing?.ringtoneUri?.let { cleanupRingtones(listOf(it)) }
+        if (_busy.value || _saved.value || _importing.value || !_state.value.loaded || alarmId <= 0) return
+        _busy.value = true
+        mutationJob = viewModelScope.launch {
+            try {
+                operations.delete(alarmId)
+                if (alarmId in operations.failedScheduleIds.value) {
+                    _scheduleWarning.value = "闹钟已删除，但系统取消失败；请在列表中重新排程"
+                }
+                _saved.value = true
+            } catch (error: Exception) {
+                _message.value = "删除失败：" + (error.message ?: "未知错误")
+            } finally {
+                _busy.value = false
             }
-            _saved.value = true
         }
     }
 
@@ -855,17 +926,21 @@ class AlarmEditViewModel(
     }
 
     override fun onCleared() {
+        closed = true
         stopPreview()
         // 清理本次会话导入、但最终未保存的铃声文件，避免私有目录只增不减。
         // viewModelScope 已随 onCleared 取消，用独立 scope 收尾；引用检查保证不会误删已保存的。
         val orphans = sessionImportedUris.toList()
         sessionImportedUris.clear()
-        if (orphans.isNotEmpty()) {
-            val repo = repository
-            val app = getApplication<Application>()
-            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-                val referenced = repo.alarms.first().mapNotNull { it.ringtoneUri }.toSet()
-                orphans.forEach { RingtoneImporter.deleteOwnedRingtone(app, it, referenced) }
+        val pendingImports = importJobs.toList()
+        val pendingMutation = mutationJob
+        importScope.launch {
+            try {
+                pendingMutation?.join()
+                pendingImports.joinAll()
+                operations.cleanupRingtones(orphans)
+            } finally {
+                importScope.cancel()
             }
         }
         super.onCleared()
